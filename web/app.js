@@ -89,9 +89,7 @@ function renderValidation(data) {
   renderCustomerCard(data.customer || {}, data.integrations || {});
 
   const checks = data.checks || [];
-  $("checklistOrder").innerHTML = renderChecklist(checks.filter((c) => c.module === "ORDER"));
-  $("checklistCustomer").innerHTML = renderChecklist(checks.filter((c) => c.module === "CUSTOMER"));
-  $("checklistBarcode").innerHTML = renderChecklist(checks.filter((c) => c.module === "BARCODE"));
+  renderChecklists(checks);
 
   $("orderDetails").innerHTML = orderDetailsTable(data.lines || [], data.header || {}, data.customer || {});
   renderWorkOrders(data.work_orders || []);
@@ -170,6 +168,31 @@ function renderCustomerCard(c, integrations) {
     }
   }
   card.innerHTML = html;
+}
+
+// Render one section per module present in the response. Known modules come first
+// (in this order); any new module the backend adds appears automatically after them.
+const MODULE_ORDER = ["ORDER", "CUSTOMER", "BARCODE", "PRICING", "INVOICE", "PROCUREMENT", "MANUFACTURING"];
+const MODULE_LABEL = {
+  ORDER: "Order checks", CUSTOMER: "Customer checks",
+  BARCODE: "Barcode / Fusion checks", PRICING: "Pricing checks",
+  INVOICE: "Invoice checks", PROCUREMENT: "Procurement checks",
+  MANUFACTURING: "Manufacturing checks",
+};
+
+function moduleLabel(m) {
+  return MODULE_LABEL[m] || (m ? m.charAt(0) + m.slice(1).toLowerCase() + " checks" : "Other checks");
+}
+
+function renderChecklists(checks) {
+  const groups = {};
+  for (const c of checks) (groups[c.module] = groups[c.module] || []).push(c);
+  const rank = (m) => { const i = MODULE_ORDER.indexOf(m); return i < 0 ? 99 : i; };
+  const modules = Object.keys(groups).sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  $("checklists").innerHTML = modules.map((m) =>
+    `<div class="section-head"><h3>${esc(moduleLabel(m))}</h3></div>
+     <div class="checklist">${renderChecklist(groups[m])}</div>`
+  ).join("") || `<p class="muted" style="padding:8px 2px">No checks returned.</p>`;
 }
 
 function renderChecklist(checks) {

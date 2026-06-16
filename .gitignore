@@ -24,3 +24,14 @@ logs/
 data/fusion_reports/*.csv
 data/fusion_reports/*.json
 data/fusion_reports/*.raw
+
+# Oracle wallet (CREDENTIALS) — never commit
+Wallet_*/
+data/wallet/
+*.sso
+*.p12
+*.jks
+
+# Raw data exports — large + customer PII (email/PAN/GSTIN)
+data/orders/*.csv
+data/orders/*.xlsx

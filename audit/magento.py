@@ -7,6 +7,7 @@ audit-eligible yet.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -555,6 +556,108 @@ def _check_sold_not_onhand(header: dict, lines: list[dict]) -> CheckResult:
     )
 
 
+# ── Barcode price-breakup validation ────────────────────────────────────────
+# Ported from pricing_engine prevalidators.go (BlockValidateStoreBarcodeDetail) and
+# stage-branch PRC rules. A corrupted/incorrect price breakup on a barcode breaks
+# order sync and leaks revenue, so we validate sfoi.price_breakup directly.
+_PB_COMPONENT_VS_SUBTOTAL_BUFFER = 10.0    # Σ component FV vs sub_total (±₹10)
+_PB_SUBTOTAL_TAX_VS_SELLING_BUFFER = 3.0   # sub_total + tax vs selling (±₹3)
+_PB_TAX_RATE = 3.0                          # GST %
+_PB_DIAMOND_MIN_RATE = 50000.0             # diamond rate floor (per-carat)
+
+
+def _pb_components(price_breakup: Any) -> list[dict]:
+    """Normalize sfoi.price_breakup (JSON str | list | dict-of-lists) -> flat components."""
+    pb = price_breakup
+    if isinstance(pb, (str, bytes)):
+        text = str(pb).strip()
+        if not text or text.upper() == "NULL":
+            return []
+        try:
+            pb = json.loads(text)
+        except (ValueError, TypeError):
+            return []
+    if isinstance(pb, dict):
+        out: list[dict] = []
+        for group in pb.values():
+            if isinstance(group, list):
+                out.extend(c for c in group if isinstance(c, dict))
+        return out
+    if isinstance(pb, list):
+        return [c for c in pb if isinstance(c, dict)]
+    return []
+
+
+def _validate_line_price_breakup(barcode: str, price_breakup: Any) -> list[str]:
+    """Apply pricing_engine barcode rules + PRC reconciliation. Returns error strings."""
+    comps = _pb_components(price_breakup)
+    if not comps:
+        return []  # nothing to validate (barcode presence handled elsewhere)
+
+    sub_total = tax_fv = selling = None
+    component_sum = 0.0
+    errors: list[str] = []
+
+    for c in comps:
+        label = str(c.get("l") or "").strip().lower()
+        fv = _num(c.get("fv"))
+        if label in ("sub_total", "subtotal"):
+            sub_total = fv
+            continue
+        if label == "tax":
+            tax_fv = fv
+            continue
+        if "selling" in label:
+            selling = fv
+            continue
+        if label.endswith("_total"):
+            continue  # intermediate summary (gold_total, diamond_total, component_total)
+        # real component row
+        if fv is not None:
+            component_sum += fv
+        w, r = _num(c.get("w")) or 0.0, _num(c.get("r")) or 0.0
+        if "diamond" in label or "solitaire" in label:
+            if w > 0 and not (fv or 0):
+                errors.append(f"{barcode}: diamond priced 0 with weight {w:g}")
+            elif r and r < _PB_DIAMOND_MIN_RATE:
+                errors.append(f"{barcode}: diamond rate {r:.0f} < {_PB_DIAMOND_MIN_RATE:.0f}")
+        elif "gemstone" in label:
+            if w > 0 and not (fv or 0):
+                errors.append(f"{barcode}: gemstone priced 0 with weight {w:g}")
+
+    if sub_total is not None and abs(component_sum - sub_total) > _PB_COMPONENT_VS_SUBTOTAL_BUFFER:
+        errors.append(f"{barcode}: Σ components {component_sum:.0f} ≠ sub_total {sub_total:.0f} (±10)")
+    if sub_total is not None and selling is not None and \
+            abs((sub_total + (tax_fv or 0)) - selling) > _PB_SUBTOTAL_TAX_VS_SELLING_BUFFER:
+        errors.append(f"{barcode}: sub_total+tax {sub_total + (tax_fv or 0):.0f} ≠ selling {selling:.0f} (±3)")
+    # Order price_breakup carries the tax row's `dp` as discount% (0), not the rate, so we
+    # verify the rate by ratio: tax FV must be ~3% of sub_total (pricing_engine hasValidTax==3%).
+    if sub_total and tax_fv is not None:
+        expected = sub_total * _PB_TAX_RATE / 100.0
+        if abs(tax_fv - expected) > max(2.0, expected * 0.01):
+            errors.append(f"{barcode}: tax {tax_fv:.0f} ≠ 3% of sub_total ({expected:.0f})")
+    return errors
+
+
+def _check_price_breakup(header: dict, lines: list[dict]) -> CheckResult:
+    """Barcode price-breakup validity (pricing_engine BlockValidateStoreBarcodeDetail + PRC)."""
+    errors: list[str] = []
+    for ln in lines:
+        bc = _str_val(ln.get("barcode")) or _str_val(ln.get("item_number")) or "?"
+        errors.extend(_validate_line_price_breakup(bc, ln.get("price_breakup")))
+    shown = "; ".join(errors[:6]) + (f" (+{len(errors) - 6} more)" if len(errors) > 6 else "")
+    return CheckResult(
+        name="price_breakup_valid",
+        label="Barcode price breakup",
+        module="PRICING",
+        passed=len(errors) == 0,
+        expected="Σ components = sub_total (±10), sub_total+tax = selling (±3), tax 3%, diamond/gemstone priced",
+        actual=shown if errors else "price breakup reconciles",
+        detail="Validates sfoi.price_breakup against pricing_engine BlockValidateStoreBarcodeDetail "
+               "(component FV vs sub_total, sub_total+tax vs selling, 3% tax, diamond rate/FV, gemstone FV).",
+    )
+
+
 PRE_AUDIT_RULES: list[Callable[[dict, list[dict]], CheckResult]] = [
     _check_fusion_order,
     _check_is_pushed,
@@ -569,6 +672,7 @@ PRE_AUDIT_RULES: list[Callable[[dict, list[dict]], CheckResult]] = [
     _check_barcode_transaction_sync,
     _check_no_duplicate_onhand,
     _check_sold_not_onhand,
+    _check_price_breakup,
 ]
 
 
