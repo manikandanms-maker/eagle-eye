@@ -1,0 +1,73 @@
+{
+  "order_header": {
+    "order_id": 1702368,
+    "order_no": "CL-ORD-1005",
+    "order_type": "OLD GOLD EXCHANGE",
+    "order_location": "CL-ST-MUM-Phoenix",
+    "financial_approval": "YES",
+    "payment_mode": "EXCHANGE",
+    "payment_source": "STORE",
+    "trans_date": "2026-06-14T05:30:00.000+05:30",
+    "order_date": "2026-06-15T01:45:17.000+05:30",
+    "customer_id": "C55012",
+    "customer_name": "VIKRAM SHAH",
+    "email": "vikram.shah@gmail.com",
+    "ship_pin_code": "400013",
+    "ship_state": "Maharashtra",
+    "ship_country": "India",
+    "billing_mobile": "9700011122",
+    "coupon_code": "",
+    "discount_amount": 0.0,
+    "old_gold_value": 0.0,
+    "sub_total": 30000.00,
+    "tax": 900.00,
+    "grand_total": 30900.00,
+    "order_amount": 30900.00,
+    "total_qty_ordered": 1,
+    "gift_message": "",
+    "special_instruction": ""
+  },
+  "order_items": [
+    {
+      "pricing_reference": {
+        "barcode": "1620AB1001",
+        "metal_value": 22000.0,
+        "making_charge": 6000.0,
+        "stone_value": 2000.0,
+        "computed_price": 30000.0
+      },
+      "ORDER DETAIL": {
+        "product_name": "Classic Gold Kada",
+        "sku": "KD22011-YGP000",
+        "barcode": "1620AB1001",
+        "edd_date": "2026-06-25T05:30:00.000+05:30",
+        "status": "Dispatched",
+        "price": "30000.0",
+        "discount_type": "fixed",
+        "discount_percent": "0.0",
+        "flat_discount": "0.0",
+        "price_before_tax": "30000.0",
+        "tax": "900.0",
+        "amount": "30900.0",
+        "is_diamond": false
+      },
+      "FULFILLMENT DETAIL": {
+        "sku": "KD22011-YGP000",
+        "barcode": "1620AB9999",
+        "status": "Dispatched",
+        "invoice_no": "INV/CLMUMPKM/2026-2027/JUN/512",
+        "price": "28000.0",
+        "price_before_tax": "28000.0",
+        "tax": "840.0",
+        "amount": "28840.0",
+        "is_diamond": false
+      }
+    }
+  ],
+  "order_billing_address": [
+    {"region": "Maharashtra", "postcode": "400013", "city": "mumbai", "firstname": "VIKRAM SHAH", "telephone": "9700011122", "country": "India"}
+  ],
+  "order_shipping_address": [
+    {"region": "Maharashtra", "postcode": "400013", "city": "mumbai", "firstname": "VIKRAM SHAH", "telephone": "9700011122", "country": "India"}
+  ]
+}

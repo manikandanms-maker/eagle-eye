@@ -1,0 +1,21 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Secrets / local config
+.env
+.streamlit/secrets.toml
+
+# Editor / OS / agent local files
+.claude/
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
+logs/

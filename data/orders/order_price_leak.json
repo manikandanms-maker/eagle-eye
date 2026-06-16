@@ -1,0 +1,72 @@
+{
+  "order_header": {
+    "order_id": 1702365,
+    "order_no": "CL-ORD-1002",
+    "order_type": "EZ EXCHANGE",
+    "order_location": "CL-ST-BNG-Phoenix Mall",
+    "financial_approval": "YES",
+    "payment_mode": "CARD",
+    "payment_source": "STORE",
+    "trans_date": "2026-06-14T05:30:00.000+05:30",
+    "order_date": "2026-06-15T01:45:17.000+05:30",
+    "customer_id": "C21981",
+    "customer_name": "RAMESH KUMAR",
+    "email": "ramesh.k@gmail.com",
+    "ship_pin_code": "560048",
+    "ship_state": "Karnataka",
+    "ship_country": "India",
+    "billing_mobile": "9916506461",
+    "coupon_code": "",
+    "discount_amount": 0.0,
+    "sub_total": 17028.20,
+    "tax": 510.85,
+    "grand_total": 17539.05,
+    "order_amount": 17539.05,
+    "total_qty_ordered": 1,
+    "gift_message": "",
+    "special_instruction": ""
+  },
+  "order_items": [
+    {
+      "pricing_reference": {
+        "barcode": "1514HC1384",
+        "metal_value": 13100.0,
+        "making_charge": 3100.0,
+        "stone_value": 1752.0,
+        "computed_price": 17952.0
+      },
+      "ORDER DETAIL": {
+        "product_name": "Gisa Triangular Sui Dhaaga",
+        "sku": "JE03521-YGP900",
+        "barcode": "1514HC1384",
+        "edd_date": "2026-06-20T05:30:00.000+05:30",
+        "status": "Dispatched",
+        "price": "17028.2",
+        "discount_type": "fixed",
+        "discount_percent": "0.0",
+        "flat_discount": "0.0",
+        "price_before_tax": "17028.2",
+        "tax": "510.85",
+        "amount": "17539.05",
+        "is_diamond": false
+      },
+      "FULFILLMENT DETAIL": {
+        "sku": "JE03521-YGP900",
+        "barcode": "1514HC1384",
+        "status": "Dispatched",
+        "invoice_no": "INV/CLBLRPMM/2026-2027/JUN/178",
+        "price": "17028.2",
+        "price_before_tax": "17028.2",
+        "tax": "510.85",
+        "amount": "17539.05",
+        "is_diamond": false
+      }
+    }
+  ],
+  "order_billing_address": [
+    {"region": "Karnataka", "postcode": "560048", "city": "bangalore", "firstname": "RAMESH KUMAR", "telephone": "9916506461", "country": "India"}
+  ],
+  "order_shipping_address": [
+    {"region": "Karnataka", "postcode": "560048", "city": "bangalore", "firstname": "RAMESH KUMAR", "telephone": "9916506461", "country": "India"}
+  ]
+}

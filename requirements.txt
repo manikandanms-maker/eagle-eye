@@ -1,0 +1,7 @@
+# Core engine has ZERO required deps (pure stdlib) so the CLI always runs.
+# These are only needed for the web UI and optional Claude narration.
+fastapi>=0.110
+uvicorn>=0.29
+streamlit>=1.33        # optional alternative UI
+anthropic>=0.40        # optional Claude narration
+python-dotenv>=1.0

@@ -1,0 +1,73 @@
+{
+  "order_header": {
+    "order_id": 1702366,
+    "order_no": "CL-ORD-1003",
+    "order_type": "ONLINE",
+    "order_location": "CL-WEB",
+    "financial_approval": "YES",
+    "payment_mode": "PREPAID",
+    "payment_source": "WEB",
+    "trans_date": "2026-06-14T05:30:00.000+05:30",
+    "order_date": "2026-06-15T01:45:17.000+05:30",
+    "customer_id": "C30011",
+    "customer_name": "PRIYA NAIR",
+    "email": "priya.nair@gmail.com",
+    "ship_pin_code": "600040",
+    "ship_state": "Tamil Nadu",
+    "ship_country": "India",
+    "billing_mobile": "9000012345",
+    "coupon_code": "FESTIVE35",
+    "discount_amount": 0.0,
+    "sub_total": 13000.00,
+    "tax": 390.00,
+    "grand_total": 13390.00,
+    "order_amount": 13390.00,
+    "total_qty_ordered": 1,
+    "gift_message": "Happy Anniversary! Call before delivery, surprise gift.",
+    "special_instruction": "Manager approved extra discount verbally"
+  },
+  "order_items": [
+    {
+      "pricing_reference": {
+        "barcode": "1730DD2002",
+        "metal_value": 14000.0,
+        "making_charge": 4500.0,
+        "stone_value": 1500.0,
+        "computed_price": 20000.0
+      },
+      "ORDER DETAIL": {
+        "product_name": "Aria Diamond Pendant",
+        "sku": "PE10233-WGD500",
+        "barcode": "1730DD2002",
+        "edd_date": "2026-06-22T05:30:00.000+05:30",
+        "status": "Processing",
+        "price": "20000.0",
+        "discount_type": "percentage",
+        "discount_percent": "35.0",
+        "flat_discount": "0.0",
+        "price_before_tax": "13000.0",
+        "tax": "390.0",
+        "amount": "13390.0",
+        "is_diamond": true
+      },
+      "FULFILLMENT DETAIL": {
+        "sku": "PE10233-WGD500",
+        "barcode": "1730DD2002",
+        "certificate_no": "SGLCLJ90011D",
+        "status": "Processing",
+        "invoice_no": "",
+        "price": "20000.0",
+        "price_before_tax": "13000.0",
+        "tax": "390.0",
+        "amount": "13390.0",
+        "is_diamond": true
+      }
+    }
+  ],
+  "order_billing_address": [
+    {"region": "Tamil Nadu", "postcode": "600040", "city": "chennai", "firstname": "PRIYA NAIR", "telephone": "9000012345", "country": "India"}
+  ],
+  "order_shipping_address": [
+    {"region": "Tamil Nadu", "postcode": "600040", "city": "chennai", "firstname": "PRIYA NAIR", "telephone": "9000012345", "country": "India"}
+  ]
+}

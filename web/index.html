@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Eagle Eye · CaratLane</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- ───────────────── Sidebar ───────────────── -->
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-logo">🦅</span>
+        <div class="brand-text">
+          <span class="brand-name">Eagle&nbsp;Eye</span>
+          <span class="brand-sub">CaratLane</span>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <a class="nav-item active" href="#"><span class="ni-icon">🛡️</span> Order Audit</a>
+        <a class="nav-item" href="#rules"><span class="ni-icon">📋</span> Rule Catalog</a>
+        <a class="nav-item" href="#how"><span class="ni-icon">⚙️</span> How it works</a>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="reasoner-pill" id="reasonerPill">
+          <span class="dot"></span><span id="reasonerText">reasoner: ready</span>
+        </div>
+        <p class="copy">Hybrid Safety — code decides the money,<br/>Claude only explains.</p>
+      </div>
+    </aside>
+
+    <!-- ───────────────── Main ───────────────── -->
+    <div class="main">
+      <header class="topbar">
+        <div>
+          <h1>Order Audit</h1>
+          <p class="tagline">Watching Every Transaction · Predicting Every Risk · Protecting Every Fulfillment</p>
+        </div>
+        <div class="env-badge">🟢 Local · 127.0.0.1</div>
+      </header>
+
+      <section class="content">
+        <!-- Search / command panel -->
+        <div class="search-card">
+          <label for="order">Audit an order</label>
+          <div class="search-row">
+            <div class="input-wrap">
+              <span class="input-icon">🔎</span>
+              <input id="order" type="text" list="orderList" autocomplete="off" spellcheck="false"
+                     placeholder="Type or paste an Order ID  (e.g. CL-ORD-1002)" />
+              <datalist id="orderList"></datalist>
+            </div>
+            <button id="auditBtn" class="btn-primary">Run Audit <span class="kbd">↵</span></button>
+          </div>
+          <div class="chips" id="chips"></div>
+          <p class="hint">In production this fires automatically from the OIC “order placed” webhook. Here, type any seeded Order ID or pick one below.</p>
+        </div>
+
+        <!-- Empty state -->
+        <div id="empty" class="empty-state">
+          <div class="empty-eye">🦅</div>
+          <h2>Ready to watch</h2>
+          <p>Enter an Order ID and run the audit to surface revenue-leakage risk across every CaratLane module.</p>
+        </div>
+
+        <!-- Result -->
+        <section id="result" class="hidden">
+          <div class="kpi-grid">
+            <div class="kpi" id="verdictCard">
+              <span class="kpi-label">Verdict</span>
+              <span class="kpi-value" id="verdict">—</span>
+              <span class="kpi-foot" id="orderMeta"></span>
+            </div>
+            <div class="kpi">
+              <span class="kpi-label">Revenue at risk</span>
+              <span class="kpi-value gold" id="risk">—</span>
+              <span class="kpi-foot">estimated ₹ exposure</span>
+            </div>
+            <div class="kpi">
+              <span class="kpi-label">Top severity</span>
+              <span class="kpi-value" id="sev">—</span>
+              <span class="kpi-foot">highest of all findings</span>
+            </div>
+            <div class="kpi">
+              <span class="kpi-label">Issues found</span>
+              <span class="kpi-value" id="count">—</span>
+              <span class="kpi-foot">failing checks</span>
+            </div>
+          </div>
+
+          <div class="narrative-card" id="narrative"></div>
+
+          <div class="section-head"><h3>Findings</h3><span id="findingsMeta" class="muted"></span></div>
+          <div id="issues"></div>
+
+          <div id="anomaliesWrap" class="hidden">
+            <div class="section-head"><h3>⚠️ Anomalies</h3><span class="muted">AI catch-all over free-text fields</span></div>
+            <div id="anomalies"></div>
+          </div>
+
+          <details class="raw-card">
+            <summary>🔬 Raw deterministic findings — the source of truth</summary>
+            <div id="rawTable"></div>
+          </details>
+        </section>
+      </section>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
