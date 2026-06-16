@@ -5,3 +5,6 @@ uvicorn>=0.29
 streamlit>=1.33        # optional alternative UI
 anthropic>=0.40        # optional Claude narration
 python-dotenv>=1.0
+requests>=2.31         # Fusion BI Publisher SOAP report download
+pymysql>=1.1           # Magento read-replica (first-check + live fetch)
+oracledb>=2.0          # optional Fusion manufacturing / inhouse bag lookups

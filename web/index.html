@@ -41,31 +41,56 @@
           <h1>Order Audit</h1>
           <p class="tagline">Watching Every Transaction · Predicting Every Risk · Protecting Every Fulfillment</p>
         </div>
-        <div class="env-badge">🟢 Local · 127.0.0.1</div>
+        <div class="env-badge" id="envBadge">🟢 Local · 127.0.0.1</div>
       </header>
 
       <section class="content">
         <!-- Search / command panel -->
         <div class="search-card">
-          <label for="order">Audit an order</label>
+          <label for="order">Look up an order</label>
           <div class="search-row">
             <div class="input-wrap">
               <span class="input-icon">🔎</span>
               <input id="order" type="text" list="orderList" autocomplete="off" spellcheck="false"
-                     placeholder="Type or paste an Order ID  (e.g. CL-ORD-1002)" />
+                     placeholder="Type or paste an Order Number  (e.g. CL-ORD-1002 or increment_id)" />
               <datalist id="orderList"></datalist>
             </div>
-            <button id="auditBtn" class="btn-primary">Run Audit <span class="kbd">↵</span></button>
+            <button id="validateBtn" class="btn-secondary">Validate</button>
+            <button id="auditBtn" class="btn-primary" disabled>Run Audit <span class="kbd">↵</span></button>
           </div>
           <div class="chips" id="chips"></div>
-          <p class="hint">In production this fires automatically from the OIC “order placed” webhook. Here, type any seeded Order ID or pick one below.</p>
+          <p class="hint">Step 1: validate against Magento (Fusion + pushed + barcode + ERP status). Step 2: run the full rule audit.</p>
         </div>
+
+        <!-- First-check validation -->
+        <section id="validation" class="hidden">
+          <div class="section-head">
+            <h3>First-check validation</h3>
+            <span id="validationMeta" class="muted"></span>
+          </div>
+          <div id="validationSummary" class="validation-summary"></div>
+          <div id="customerCard" class="customer-card hidden"></div>
+          <div class="section-head"><h3>Order checks</h3></div>
+          <div id="checklistOrder" class="checklist"></div>
+          <div class="section-head"><h3>Customer checks</h3></div>
+          <div id="checklistCustomer" class="checklist"></div>
+          <div class="section-head"><h3>Barcode / Fusion checks</h3></div>
+          <div id="checklistBarcode" class="checklist"></div>
+          <details class="raw-card hidden" id="workOrdersWrap">
+            <summary>🏭 Work orders (Fusion)</summary>
+            <div id="workOrders"></div>
+          </details>
+          <details class="raw-card" id="orderDetailsWrap">
+            <summary>📦 Order details from Magento (<span id="lineCount">0</span> lines)</summary>
+            <div id="orderDetails"></div>
+          </details>
+        </section>
 
         <!-- Empty state -->
         <div id="empty" class="empty-state">
           <div class="empty-eye">🦅</div>
           <h2>Ready to watch</h2>
-          <p>Enter an Order ID and run the audit to surface revenue-leakage risk across every CaratLane module.</p>
+          <p>Enter an Order Number and validate against Magento. Once it passes first-check, run the full audit for revenue-leakage risk.</p>
         </div>
 
         <!-- Result -->
