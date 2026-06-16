@@ -247,12 +247,212 @@ def fetch_jw_grn_by_order(sales_order_no: str) -> dict[str, dict]:
                 continue
             txn = row.get("TRANSACTION_NUMBER")
             existing = out.get(bc)
-            if not existing or (txn and not existing.get("transaction_number")):
-                out[bc] = {
-                    "transaction_number": txn,
-                    "gross_weight": row.get("GROSS_WEIGHT"),
-                    "grn_status": row.get("GRN_STATUS"),
-                }
     except Exception:
         return out
     return out
+
+
+def _fetch_by_barcode_chunks(
+    sql_template: str,
+    barcodes: list[str],
+    *,
+    bind_prefix: str = "b",
+) -> list[dict]:
+    """Run an IN-list query in chunks; sql_template must contain {placeholders}."""
+    cleaned = sorted({str(b).strip() for b in barcodes if str(b).strip()})
+    if not cleaned or not fusion_db_configured():
+        return []
+
+    rows: list[dict] = []
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                for offset in range(0, len(cleaned), ORACLE_IN_LIST_CHUNK):
+                    chunk = cleaned[offset: offset + ORACLE_IN_LIST_CHUNK]
+                    binds = {f"{bind_prefix}{i}": v for i, v in enumerate(chunk)}
+                    placeholders = ", ".join(f":{bind_prefix}{i}" for i in range(len(chunk)))
+                    cur.execute(sql_template.format(placeholders=placeholders), binds)
+                    cols = [d[0] for d in cur.description]
+                    rows.extend(dict(zip(cols, row)) for row in cur.fetchall())
+    except Exception:
+        return rows
+    return rows
+
+
+def fetch_paas_barcode_trx_by_barcodes(barcodes: list[str]) -> dict[str, dict]:
+    """Latest PaaS barcode trx/location row per barcode (XXCL_BARCODE_TRX_LOC_DETAILS)."""
+    sql = """
+        SELECT
+            ranked.BARCODE_NUMBER,
+            ranked.TRANSACTION_TYPE_NAME,
+            ranked.ORGANIZATION_NAME,
+            ranked.BARCODE_STATUS,
+            ranked.TRANSACTION_STATUS,
+            ranked.LAST_UPDATE_DATE
+        FROM (
+            SELECT
+                TRIM(xbtld.BARCODE_NUMBER) AS BARCODE_NUMBER,
+                xbtld.TRANSACTION_TYPE_NAME,
+                xbtld.ORGANIZATION_NAME,
+                xbtld.BARCODE_STATUS,
+                xbtld.TRANSACTION_STATUS,
+                xbtld.LAST_UPDATE_DATE,
+                ROW_NUMBER() OVER (
+                    PARTITION BY TRIM(xbtld.BARCODE_NUMBER)
+                    ORDER BY xbtld.LAST_UPDATE_DATE DESC NULLS LAST,
+                             xbtld.TRANSACTION_ID DESC NULLS LAST
+                ) rn
+            FROM wksp_xxcl.XXCL_BARCODE_TRX_LOC_DETAILS xbtld
+            WHERE xbtld.BARCODE_NUMBER IS NOT NULL
+              AND TRIM(xbtld.BARCODE_NUMBER) IN ({placeholders})
+        ) ranked
+        WHERE ranked.rn = 1
+    """
+    out: dict[str, dict] = {}
+    for row in _fetch_by_barcode_chunks(sql, barcodes):
+        bc = str(row.get("BARCODE_NUMBER") or "").strip()
+        if bc:
+            out[bc] = {
+                "organization_name": row.get("ORGANIZATION_NAME"),
+                "transaction_type_name": row.get("TRANSACTION_TYPE_NAME"),
+                "barcode_status": row.get("BARCODE_STATUS"),
+                "transaction_status": row.get("TRANSACTION_STATUS"),
+                "last_update_date": row.get("LAST_UPDATE_DATE"),
+            }
+    return out
+
+
+def fetch_duplicate_onhand_by_barcodes(barcodes: list[str]) -> dict[str, int]:
+    """FG lot_numbers with duplicate on-hand rows in Fusion."""
+    sql = """
+        SELECT
+            xioqd.lot_number,
+            COUNT(*) AS duplicate_count
+        FROM wksp_xxcl.XXCL_INV_ONHAND_QUANTITIES_DETAIL xioqd
+        INNER JOIN wksp_xxcl.xxcl_item_master xm
+            ON xm.inventory_item_id = xioqd.inventory_item_id
+           AND xm.item_class_name LIKE 'FG%%'
+        WHERE TRIM(xioqd.lot_number) IN ({placeholders})
+        GROUP BY xioqd.lot_number
+        HAVING COUNT(*) > 1
+    """
+    out: dict[str, int] = {}
+    for row in _fetch_by_barcode_chunks(sql, barcodes):
+        bc = str(row.get("LOT_NUMBER") or "").strip()
+        if bc:
+            try:
+                out[bc] = int(row.get("DUPLICATE_COUNT") or 0)
+            except (TypeError, ValueError):
+                out[bc] = 2
+    return out
+
+
+def fetch_sold_onhand_by_barcodes(barcodes: list[str]) -> dict[str, dict]:
+    """Sold barcodes that still have on-hand quantity in Fusion."""
+    sql = """
+        SELECT
+            xbtld.barcode_number,
+            xbtld.barcode_status,
+            xbtld.transaction_status,
+            xioqd.lot_number,
+            xioqd.organization_id
+        FROM (
+            SELECT
+                TRIM(barcode_number) AS barcode_number,
+                barcode_status,
+                transaction_status,
+                ROW_NUMBER() OVER (
+                    PARTITION BY TRIM(barcode_number)
+                    ORDER BY creation_date DESC
+                ) rn
+            FROM wksp_xxcl.xxcl_barcode_trx_loc_details
+            WHERE barcode_number IS NOT NULL
+              AND TRIM(barcode_number) IN ({placeholders})
+        ) xbtld
+        INNER JOIN wksp_xxcl.xxcl_inv_onhand_quantities_detail xioqd
+            ON xbtld.barcode_number = TRIM(xioqd.lot_number)
+        WHERE xbtld.rn = 1
+          AND xbtld.barcode_status = 'SOLD'
+          AND xbtld.transaction_status = 'SOLD'
+    """
+    out: dict[str, dict] = {}
+    for row in _fetch_by_barcode_chunks(sql, barcodes):
+        bc = str(row.get("BARCODE_NUMBER") or row.get("LOT_NUMBER") or "").strip()
+        if bc:
+            out[bc] = {
+                "barcode_status": row.get("BARCODE_STATUS"),
+                "transaction_status": row.get("TRANSACTION_STATUS"),
+                "organization_id": row.get("ORGANIZATION_ID"),
+            }
+    return out
+
+
+def fetch_work_orders_by_sales_order(sales_order_no: str) -> list[dict]:
+    """Work orders + GRN/PO/ASBN for a sales order (hash_id)."""
+    sales_order_no = (sales_order_no or "").strip()
+    if not sales_order_no or not fusion_db_configured():
+        return []
+
+    sql = """
+        SELECT
+            xwwob.WORK_ORDER_NUMBER,
+            CASE
+                WHEN xwwob.WORK_ORDER_NUMBER LIKE '%%/%%/%%/%%'
+                    THEN 'INHOUSE'
+                WHEN xwwob.WORK_ORDER_NUMBER LIKE 'MUMFC-%%'
+                    THEN 'JOB WORK'
+                ELSE 'INHOUSE'
+            END AS MANUFACTURING_TYPE,
+            xwwob.ATTRIBUTE_CHAR1 AS SALES_ORDER,
+            xwwob.ATTRIBUTE_CHAR5 AS PO_NUMBER,
+            xvag.GRN_STATUS,
+            xvag.ASBN_NUMBER,
+            xvag.INVOICE_NUMBER,
+            xvag.GRN_number,
+            xvag.huid_number,
+            xwwob.PLANNED_START_DATE,
+            xwwob.ACTUAL_START_DATE,
+            xwwob.PLANNED_COMPLETION_DATE,
+            xwwob.COMPL_SUBINVENTORY_CODE,
+            xvag.GRN_CREATED_DATE
+        FROM wksp_xxcl.XXCL_WIE_WORK_ORDERS_B xwwob
+        LEFT JOIN (
+            SELECT *
+            FROM (
+                SELECT
+                    xvag.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY xvag.SALES_ORDER_NO
+                        ORDER BY xvag.GRN_CREATED_DATE DESC
+                    ) rn
+                FROM wksp_xxcl.XXCL_VNDR_ADD_GRN xvag
+            )
+            WHERE rn = 1
+        ) xvag
+            ON xvag.SALES_ORDER_NO = xwwob.ATTRIBUTE_CHAR1
+        WHERE xwwob.ATTRIBUTE_CHAR1 = :sales_order_no
+        ORDER BY xwwob.WORK_ORDER_NUMBER
+    """
+    try:
+        rows = fetch_all(sql, {"sales_order_no": sales_order_no})
+        return [
+            {
+                "work_order_number": row.get("WORK_ORDER_NUMBER"),
+                "manufacturing_type": row.get("MANUFACTURING_TYPE"),
+                "sales_order": row.get("SALES_ORDER"),
+                "po_number": row.get("PO_NUMBER"),
+                "grn_status": row.get("GRN_STATUS"),
+                "asbn_number": row.get("ASBN_NUMBER"),
+                "invoice_number": row.get("INVOICE_NUMBER"),
+                "grn_number": row.get("GRN_NUMBER"),
+                "huid_number": row.get("HUID_NUMBER"),
+                "planned_start_date": row.get("PLANNED_START_DATE"),
+                "actual_start_date": row.get("ACTUAL_START_DATE"),
+                "planned_completion_date": row.get("PLANNED_COMPLETION_DATE"),
+                "compl_subinventory_code": row.get("COMPL_SUBINVENTORY_CODE"),
+                "grn_created_date": row.get("GRN_CREATED_DATE"),
+            }
+            for row in rows
+        ]
+    except Exception:
+        return []

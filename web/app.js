@@ -91,8 +91,30 @@ function renderValidation(data) {
   const checks = data.checks || [];
   $("checklistOrder").innerHTML = renderChecklist(checks.filter((c) => c.module === "ORDER"));
   $("checklistCustomer").innerHTML = renderChecklist(checks.filter((c) => c.module === "CUSTOMER"));
+  $("checklistBarcode").innerHTML = renderChecklist(checks.filter((c) => c.module === "BARCODE"));
 
   $("orderDetails").innerHTML = orderDetailsTable(data.lines || [], data.header || {}, data.customer || {});
+  renderWorkOrders(data.work_orders || []);
+}
+
+function renderWorkOrders(rows) {
+  const wrap = $("workOrdersWrap");
+  const el = $("workOrders");
+  if (!rows.length) {
+    wrap.classList.add("hidden");
+    el.innerHTML = "";
+    return;
+  }
+  wrap.classList.remove("hidden");
+  const cols = [
+    "work_order_number", "manufacturing_type", "po_number", "asbn_number",
+    "grn_number", "grn_status", "planned_start_date", "planned_completion_date",
+  ];
+  const body = rows.map((r) =>
+    `<tr>${cols.map((c) => `<td>${cellVal(r, c)}</td>`).join("")}</tr>`
+  ).join("");
+  el.innerHTML = `<div class="table-scroll"><table><thead><tr>${cols.map((c) =>
+    `<th>${esc(c.replace(/_/g, " "))}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
 function renderCustomerCard(c, integrations) {
@@ -129,6 +151,16 @@ function renderCustomerCard(c, integrations) {
     } else if (integrations.fusion_soap) {
       bits.push("ATP/WD/UOM cache empty — run refresh");
     }
+    if (integrations.paas_barcode_trx) bits.push("PaaS trx/loc");
+    if (integrations.saas_barcode_location === "disabled") bits.push("SaaS loc (off)");
+    else if (integrations.saas_barcode_location && integrations.saas_barcode_location !== "run_report_failed") {
+      bits.push(`SaaS loc (${integrations.saas_barcode_location})`);
+    }
+    if (integrations.saas_barcode_transaction === "disabled") bits.push("SaaS txn (off)");
+    else if (integrations.saas_barcode_transaction && integrations.saas_barcode_transaction !== "run_report_failed") {
+      bits.push(`SaaS txn (${integrations.saas_barcode_transaction})`);
+    }
+    if (integrations.work_orders) bits.push("work orders");
     if (integrations.fusion_db && !integrations.manufacturing) bits.push("fusion: no mfg rows");
     if (bits.length) {
       html += `<div class="customer-field" style="grid-column:1/-1">
@@ -160,6 +192,7 @@ function renderChecklist(checks) {
 function cellVal(ln, key) {
   const v = ln[key];
   if (v == null || v === "") return "—";
+  if (typeof v === "boolean") return v ? "YES" : "NO";
   if (key === "final_price" || key === "price_before_tax" || key === "tax" || key === "loss_stock_value") {
     const n = Number(v);
     return Number.isFinite(n) ? inr(n) : esc(v);
@@ -178,9 +211,13 @@ function orderDetailsTable(lines, header, customer) {
 
   const baseCols = [
     "barcode", "item_number", "name", "erp_status",
+    "expected_delivery_date_min", "expected_delivery_date_max",
     "atp_status", "wd_status", "uom_status",
     "invoice_number", "invoice_barcode", "invoice_flag",
     "make_buy", "vendor_name", "manufacturing_type",
+    "cl_location_name", "paas_organization_name", "saas_location_name", "location_mismatch",
+    "cl_transaction_type", "paas_transaction_type", "saas_transaction_type", "transaction_mismatch",
+    "duplicate_onhand_count", "sold_onhand_present",
     "price_before_tax", "tax", "final_price", "location_name",
   ];
   const extraCols = [];

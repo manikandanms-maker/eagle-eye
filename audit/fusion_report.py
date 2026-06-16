@@ -39,6 +39,12 @@ DEFAULT_SCHEDULE_SOAP_URL = (
 DEFAULT_REPORT_PATH = (
     "/Custom/Extraction Reports/ITEM ATP WD UOM STATUS/item_wd_atp_uom.xdo"
 )
+DEFAULT_LOCATION_REPORT_PATH = (
+    "/Custom/Extraction Reports/SaaS_location_barcode_praveen/SaaS_location_barcode_RPT_1.xdo"
+)
+DEFAULT_TRANSACTION_REPORT_PATH = (
+    "/Custom/Extraction Reports/Barcode_transaction_type/Barcode_transcation_type_4_RPT.xdo"
+)
 
 TERMINAL_JOB_STATUSES = frozenset({
     "SUCCESS", "SUCCEEDED", "COMPLETE", "COMPLETED", "ERROR", "FAILED",
@@ -51,6 +57,7 @@ CACHE_META = CACHE_DIR / "item_wd_atp_uom.meta.json"
 
 _refresh_lock = False
 _item_status_cache: dict[str, tuple[float, dict]] = {}
+_barcode_report_cache: dict[str, tuple[float, dict]] = {}
 
 
 class FusionSoapConfigError(RuntimeError):
@@ -89,6 +96,31 @@ def _run_report_timeout() -> int:
         return int(os.getenv("FUSION_RUN_REPORT_TIMEOUT", "180"))
     except ValueError:
         return 180
+
+
+def _location_report_path() -> str:
+    return os.getenv("FUSION_LOCATION_REPORT_PATH", DEFAULT_LOCATION_REPORT_PATH).strip()
+
+
+def _transaction_report_path() -> str:
+    return os.getenv("FUSION_TRANSACTION_REPORT_PATH", DEFAULT_TRANSACTION_REPORT_PATH).strip()
+
+
+def _barcode_report_param(kind: str) -> str:
+    if kind == "location":
+        return os.getenv("FUSION_LOCATION_REPORT_PARAM", "stock_code").strip() or "stock_code"
+    return os.getenv("FUSION_TRANSACTION_REPORT_PARAM", "stock_code").strip() or "stock_code"
+
+
+def _barcode_saas_enabled() -> bool:
+    return os.getenv("FUSION_ENABLE_BARCODE_SAAS_REPORTS", "0").lower() in {"1", "true", "yes"}
+
+
+def _barcode_report_timeout() -> int:
+    try:
+        return int(os.getenv("FUSION_BARCODE_REPORT_TIMEOUT", "45"))
+    except ValueError:
+        return 45
 
 
 def escape_xml(value: Any) -> str:
@@ -284,14 +316,22 @@ def build_download_document_data_envelope(job_output_id: str, user_id: str, pass
 
 def build_run_report_envelope(
     report_path: str,
-    item_number: str,
+    parameters: dict[str, str],
     user_id: str,
     password: str,
     *,
     attribute_format: str = "csv",
-    param_name: Optional[str] = None,
 ) -> str:
-    pname = param_name or _item_param_name()
+    param_blocks = []
+    for name, value in parameters.items():
+        param_blocks.append(f"""
+          <pub:item>
+            <pub:name>{escape_xml(name)}</pub:name>
+            <pub:values>
+              <pub:item>{escape_xml(value)}</pub:item>
+            </pub:values>
+          </pub:item>""")
+    params_xml = "".join(param_blocks)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope" xmlns:pub="{PUB_NS}">
   <soap12:Header/>
@@ -303,13 +343,7 @@ def build_run_report_envelope(
         <pub:byPassCache>true</pub:byPassCache>
         <pub:reportAbsolutePath>{escape_xml(report_path)}</pub:reportAbsolutePath>
         <pub:sizeOfDataChunkDownload>-1</pub:sizeOfDataChunkDownload>
-        <pub:parameterNameValues>
-          <pub:item>
-            <pub:name>{escape_xml(pname)}</pub:name>
-            <pub:values>
-              <pub:item>{escape_xml(item_number)}</pub:item>
-            </pub:values>
-          </pub:item>
+        <pub:parameterNameValues>{params_xml}
         </pub:parameterNameValues>
       </pub:reportRequest>
       <pub:userID>{escape_xml(user_id)}</pub:userID>
@@ -614,6 +648,130 @@ def _row_to_status(norm: dict[str, str], fallback_item: Optional[str] = None) ->
     }
 
 
+def run_report_csv(report_path: str, parameters: dict[str, str], *, timeout: Optional[int] = None) -> str:
+    """Run a Fusion BI report synchronously and return decoded CSV text."""
+    if not soap_configured():
+        raise FusionSoapConfigError("Set FUSION_SOAP_USER and FUSION_SOAP_PASSWORD in .env")
+    user = _user()
+    password = _password()
+    xml = post_fusion_soap(
+        _resolve_external_soap_url(),
+        build_run_report_envelope(report_path, parameters, user, password),
+        use_body_credentials=True,
+        timeout=timeout or _run_report_timeout(),
+        soap_version="1.2",
+    )
+    extract_soap_fault(xml)
+    report_bytes = extract_xml_element_text(xml, "reportBytes")
+    if not report_bytes:
+        raise RuntimeError(f"Fusion runReport returned no reportBytes for {report_path}")
+    return base64.b64decode(re.sub(r"\s+", "", report_bytes)).decode("utf-8-sig", errors="replace")
+
+
+def _row_to_barcode_record(norm: dict[str, str], fallback_barcode: Optional[str] = None) -> Optional[dict]:
+    barcode = _pick_column(
+        norm, "STOCK_CODE", "BARCODE", "BARCODE_NUMBER", "LOT_NUMBER", "STOCK_ID"
+    ) or fallback_barcode
+    if not barcode:
+        return None
+    return {
+        "barcode": barcode,
+        "location_name": _pick_column(
+            norm, "LOCATION_NAME", "ORGANIZATION_NAME", "LOC_NAME", "LOCATION"
+        ),
+        "transaction_type": _pick_column(
+            norm, "TRANSACTION_TYPE", "TRANSACTION_TYPE_NAME", "TRANS_TYPE"
+        ),
+        "barcode_status": _pick_column(norm, "BARCODE_STATUS", "STOCK_STATUS", "STATUS"),
+        "transaction_status": _pick_column(norm, "TRANSACTION_STATUS", "TRANS_STATUS"),
+    }
+
+
+def _parse_barcode_report_csv(csv_text: str, *, fallback_barcode: Optional[str] = None) -> Optional[dict]:
+    lines = [line for line in (csv_text or "").splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    reader = csv.DictReader(lines)
+    if not reader.fieldnames:
+        return None
+    for row in reader:
+        norm = {_norm_col(k): (v.strip() if isinstance(v, str) else v) for k, v in row.items() if k}
+        rec = _row_to_barcode_record(norm, fallback_barcode=fallback_barcode)
+        if rec and (
+            rec.get("location_name")
+            or rec.get("transaction_type")
+            or rec.get("barcode_status")
+            or rec.get("transaction_status")
+        ):
+            return rec
+    return None
+
+
+def _barcode_cache_key(kind: str, barcode: str) -> str:
+    return f"{kind}:{barcode}"
+
+
+def run_barcode_report(kind: str, barcode: str) -> dict:
+    """Fetch SaaS location or transaction report row for one barcode."""
+    bc = str(barcode or "").strip()
+    if not bc:
+        raise ValueError("barcode is required")
+
+    cache_key = _barcode_cache_key(kind, bc)
+    now = time.time()
+    cached = _barcode_report_cache.get(cache_key)
+    if cached and (now - cached[0]) < _cache_ttl_seconds():
+        return dict(cached[1])
+
+    if kind == "location":
+        report_path = _location_report_path()
+        param = _barcode_report_param("location")
+    elif kind == "transaction":
+        report_path = _transaction_report_path()
+        param = _barcode_report_param("transaction")
+    else:
+        raise ValueError(f"Unknown barcode report kind: {kind}")
+
+    csv_text = run_report_csv(report_path, {param: bc}, timeout=_barcode_report_timeout())
+    rec = _parse_barcode_report_csv(csv_text, fallback_barcode=bc)
+    if not rec:
+        raise RuntimeError(f"Fusion {kind} report returned no rows for {bc}")
+
+    _barcode_report_cache[cache_key] = (now, rec)
+    return dict(rec)
+
+
+def lookup_barcode_saas_location(barcodes: list[str]) -> tuple[dict[str, dict], str]:
+    return _lookup_barcode_reports("location", barcodes)
+
+
+def lookup_barcode_saas_transaction(barcodes: list[str]) -> tuple[dict[str, dict], str]:
+    return _lookup_barcode_reports("transaction", barcodes)
+
+
+def _lookup_barcode_reports(kind: str, barcodes: list[str]) -> tuple[dict[str, dict], str]:
+    cleaned = sorted({str(b).strip() for b in barcodes if str(b).strip()})
+    if not cleaned:
+        return {}, "empty"
+    if not _barcode_saas_enabled():
+        return {}, "disabled"
+    if not soap_configured():
+        return {}, "soap_not_configured"
+
+    out: dict[str, dict] = {}
+    errors = 0
+    for bc in cleaned:
+        try:
+            out[bc] = run_barcode_report(kind, bc)
+        except Exception as exc:
+            errors += 1
+            logger.warning("Fusion %s report failed for %s: %s", kind, bc, exc)
+    if not out:
+        return {}, "run_report_failed" if errors else "empty"
+    state = "run_report" if len(out) == len(cleaned) else "partial_run_report"
+    return out, state
+
+
 def _parse_report_csv_text(csv_text: str, *, fallback_item: Optional[str] = None) -> Optional[dict]:
     lines = [line for line in (csv_text or "").splitlines() if line.strip()]
     if len(lines) < 2:
@@ -659,21 +817,7 @@ def run_report_for_item(item_number: str) -> dict:
     if cached and (now - cached[0]) < _cache_ttl_seconds():
         return dict(cached[1])
 
-    user = _user()
-    password = _password()
-    xml = post_fusion_soap(
-        _resolve_external_soap_url(),
-        build_run_report_envelope(_report_path(), sku, user, password),
-        use_body_credentials=True,
-        timeout=_run_report_timeout(),
-        soap_version="1.2",
-    )
-    extract_soap_fault(xml)
-    report_bytes = extract_xml_element_text(xml, "reportBytes")
-    if not report_bytes:
-        raise RuntimeError(f"Fusion runReport returned no reportBytes for {sku}")
-
-    csv_text = base64.b64decode(re.sub(r"\s+", "", report_bytes)).decode("utf-8-sig", errors="replace")
+    csv_text = run_report_csv(_report_path(), {_item_param_name(): sku})
     status = _parse_report_csv_text(csv_text, fallback_item=sku)
     if not status:
         raise RuntimeError(f"Fusion runReport returned no ATP/WD/UOM rows for {sku}")

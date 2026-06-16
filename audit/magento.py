@@ -188,6 +188,21 @@ ORDER BY STR_TO_DATE(
 ) DESC
 """
 
+BARCODE_ATTR_BY_BARCODES_SQL = """
+SELECT
+  TRIM(eba.stock_code) AS stock_code,
+  elmd.location_name,
+  eba.transaction_type,
+  eba.barcode_status,
+  eba.transaction_status,
+  eba.updated_at
+FROM erp_barcode_attributes eba
+LEFT JOIN erp_location_master_dtl elmd
+  ON elmd.location_code = eba.location_code
+WHERE TRIM(COALESCE(eba.stock_code, '')) <> ''
+  AND TRIM(eba.stock_code) IN ({placeholders})
+"""
+
 ELIGIBLE_ERP_STATUSES = frozenset({"On Hold", "Processing", "Dispatched"})
 
 
@@ -229,6 +244,7 @@ class ValidationResult:
     message: str = ""
     meta: str = ""
     integrations: dict = field(default_factory=dict)
+    work_orders: list[dict] = field(default_factory=list)
     source: str = "magento"
 
     def to_dict(self) -> dict:
@@ -247,6 +263,7 @@ class ValidationResult:
             "message": self.message,
             "meta": self.meta,
             "integrations": _json_safe(self.integrations),
+            "work_orders": [_json_safe(row) for row in self.work_orders],
             "source": self.source,
         }
 
@@ -410,6 +427,56 @@ def _check_customer_email(header: dict, lines: list[dict]) -> CheckResult:
     )
 
 
+def _norm_token(value: Any) -> str:
+    return re.sub(r"\s+", " ", _str_val(value).upper())
+
+
+def _values_match(a: Any, b: Any) -> bool:
+    left, right = _norm_token(a), _norm_token(b)
+    if not left or not right:
+        return True
+    return left == right or left in right or right in left
+
+
+_TXN_TYPE_ALIASES = {
+    "SOI": "SALES ORDER ISSUE",
+    "POR": "PURCHASE ORDER RECEIPT",
+    "TOI": "TRANSFER ORDER ISSUE",
+    "TOR": "TRANSFER ORDER RECEIPT",
+}
+
+
+def _txn_types_align(a: Any, b: Any) -> bool:
+    left, right = _norm_token(a), _norm_token(b)
+    if not left or not right:
+        return True
+    if _values_match(left, right):
+        return True
+    left_full = _TXN_TYPE_ALIASES.get(left, left)
+    right_full = _TXN_TYPE_ALIASES.get(right, right)
+    return _values_match(left_full, right_full)
+
+
+def _check_expected_delivery_dates(header: dict, lines: list[dict]) -> CheckResult:
+    missing = [
+        _str_val(ln.get("barcode"))
+        for ln in lines
+        if not _str_val(ln.get("expected_delivery_date_min"))
+        or not _str_val(ln.get("expected_delivery_date_max"))
+    ]
+    missing = [bc for bc in missing if bc]
+    return CheckResult(
+        name="expected_delivery_dates",
+        label="Expected delivery dates",
+        module="ORDER",
+        passed=len(missing) == 0,
+        expected="expected_delivery_date_min and max on every line",
+        actual=f"{len(lines) - len(missing)}/{len(lines)} lines complete"
+        if lines else "no lines",
+        detail="Both EDD min and max must be present for each barcode line.",
+    )
+
+
 def _check_fusion_party(header: dict, lines: list[dict]) -> CheckResult:
     party = _str_val(header.get("fusion_party_number")
                      or (lines[0].get("fusion_party_number") if lines else ""))
@@ -421,15 +488,87 @@ def _check_fusion_party(header: dict, lines: list[dict]) -> CheckResult:
     )
 
 
+def _check_barcode_location_sync(header: dict, lines: list[dict]) -> CheckResult:
+    mismatches = [
+        _str_val(ln.get("barcode"))
+        for ln in lines
+        if ln.get("location_mismatch")
+    ]
+    mismatches = [bc for bc in mismatches if bc]
+    return CheckResult(
+        name="barcode_location_sync",
+        label="Barcode location (CL vs PaaS vs SaaS)",
+        module="BARCODE",
+        passed=len(mismatches) == 0,
+        expected="CL, PaaS, and SaaS locations aligned",
+        actual=", ".join(mismatches) if mismatches else "all aligned",
+        detail="Compares erp_barcode_attributes, Fusion trx/loc, and SaaS location report.",
+    )
+
+
+def _check_barcode_transaction_sync(header: dict, lines: list[dict]) -> CheckResult:
+    mismatches = [
+        _str_val(ln.get("barcode"))
+        for ln in lines
+        if ln.get("transaction_mismatch")
+    ]
+    mismatches = [bc for bc in mismatches if bc]
+    return CheckResult(
+        name="barcode_transaction_sync",
+        label="Barcode transaction (CL vs PaaS vs SaaS)",
+        module="BARCODE",
+        passed=len(mismatches) == 0,
+        expected="transaction type/status aligned across systems",
+        actual=", ".join(mismatches) if mismatches else "all aligned",
+        detail="Compares erp_barcode_attributes, Fusion trx/loc, and SaaS transaction report.",
+    )
+
+
+def _check_no_duplicate_onhand(header: dict, lines: list[dict]) -> CheckResult:
+    dupes = [
+        f"{_str_val(ln.get('barcode'))} ({ln.get('duplicate_onhand_count')})"
+        for ln in lines
+        if ln.get("duplicate_onhand_count")
+    ]
+    return CheckResult(
+        name="no_duplicate_onhand",
+        label="No duplicate on-hand (PaaS)",
+        module="BARCODE",
+        passed=len(dupes) == 0,
+        expected="no FG duplicate lot on-hand rows",
+        actual=", ".join(dupes) if dupes else "none",
+        detail="Fusion XXCL_INV_ONHAND_QUANTITIES_DETAIL duplicate lot_number check.",
+    )
+
+
+def _check_sold_not_onhand(header: dict, lines: list[dict]) -> CheckResult:
+    sold = [_str_val(ln.get("barcode")) for ln in lines if ln.get("sold_onhand_present")]
+    sold = [bc for bc in sold if bc]
+    return CheckResult(
+        name="sold_not_onhand",
+        label="Sold barcodes not on-hand (PaaS)",
+        module="BARCODE",
+        passed=len(sold) == 0,
+        expected="SOLD barcodes should not have on-hand qty",
+        actual=", ".join(sold) if sold else "none",
+        detail="Fusion sold trx with remaining on-hand quantity.",
+    )
+
+
 PRE_AUDIT_RULES: list[Callable[[dict, list[dict]], CheckResult]] = [
     _check_fusion_order,
     _check_is_pushed,
     _check_non_test_email,
     _check_barcode_present,
     _check_erp_status,
+    _check_expected_delivery_dates,
     _check_customer_name,
     _check_customer_email,
     _check_fusion_party,
+    _check_barcode_location_sync,
+    _check_barcode_transaction_sync,
+    _check_no_duplicate_onhand,
+    _check_sold_not_onhand,
 ]
 
 
@@ -500,27 +639,123 @@ def _fetch_vendor_qc_by_pos(po_numbers: list[str]) -> dict[tuple[str, str], dict
     return out
 
 
-def _enrich_lines(header: dict, lines: list[dict]) -> tuple[list[dict], dict]:
-    """Merge invoice, manufacturing, inhouse bag, and JW vendor data onto barcode rows."""
+def _fetch_cl_barcode_attrs(barcodes: list[str]) -> dict[str, dict]:
+    """CL erp_barcode_attributes + location for order barcodes."""
+    cleaned = sorted({_str_val(b) for b in barcodes if _str_val(b)})
+    if not cleaned or not db_configured():
+        return {}
+
+    placeholders = ", ".join(f"%(bc{i})s" for i in range(len(cleaned)))
+    params = {f"bc{i}": v for i, v in enumerate(cleaned)}
+    sql = BARCODE_ATTR_BY_BARCODES_SQL.format(placeholders=placeholders)
+
+    out: dict[str, dict] = {}
+    try:
+        rows = fetch_all(sql, params)
+        for row in rows:
+            bc = _str_val(row.get("stock_code"))
+            if not bc:
+                continue
+            out[bc] = {
+                "cl_location_name": row.get("location_name"),
+                "cl_transaction_type": row.get("transaction_type"),
+                "cl_barcode_status": row.get("barcode_status"),
+                "cl_transaction_status": row.get("transaction_status"),
+                "cl_updated_at": row.get("updated_at"),
+            }
+    except Exception:
+        return out
+    return out
+
+
+def _detect_location_mismatch(
+    cl_loc: Any,
+    paas_loc: Any,
+    saas_loc: Any,
+) -> bool:
+    cl = _norm_token(cl_loc)
+    paas = _norm_token(paas_loc)
+    saas = _norm_token(saas_loc)
+    refs = [v for v in (cl, paas, saas) if v]
+    if len(refs) < 2:
+        return False
+    first = refs[0]
+    return any(not _values_match(first, other) for other in refs[1:])
+
+
+def _detect_transaction_mismatch(
+    cl_type: Any,
+    cl_bstatus: Any,
+    cl_tstatus: Any,
+    paas_type: Any,
+    paas_bstatus: Any,
+    paas_tstatus: Any,
+    saas_type: Any,
+    saas_bstatus: Any,
+    saas_tstatus: Any,
+) -> bool:
+    status_pairs = [
+        (cl_bstatus, paas_bstatus),
+        (cl_bstatus, saas_bstatus),
+        (cl_tstatus, paas_tstatus),
+        (cl_tstatus, saas_tstatus),
+    ]
+    for left, right in status_pairs:
+        if _norm_token(left) and _norm_token(right) and not _values_match(left, right):
+            return True
+
+    type_pairs = [
+        (cl_type, paas_type),
+        (cl_type, saas_type),
+    ]
+    for left, right in type_pairs:
+        if _norm_token(left) and _norm_token(right) and not _txn_types_align(left, right):
+            return True
+    return False
+
+
+def _enrich_lines(header: dict, lines: list[dict]) -> tuple[list[dict], dict, list[dict]]:
+    """Merge invoice, manufacturing, barcode sync, and work-order data onto barcode rows."""
     from .fusion_db import (
+        fetch_duplicate_onhand_by_barcodes,
         fetch_inhouse_bag_by_order,
         fetch_jw_grn_by_order,
         fetch_manufacturing_by_skus,
+        fetch_paas_barcode_trx_by_barcodes,
+        fetch_sold_onhand_by_barcodes,
+        fetch_work_orders_by_sales_order,
         fusion_db_configured,
+    )
+    from .fusion_report import (
+        lookup_barcode_saas_location,
+        lookup_barcode_saas_transaction,
+        lookup_item_atp_wd_uom,
+        soap_configured as fusion_soap_configured,
     )
 
     entity_id = header.get("entity_id")
     hash_id = _str_val(header.get("hash_id"))
     invoice_map = _fetch_invoice_map(int(entity_id)) if entity_id else {}
 
+    barcodes = list({_str_val(ln.get("barcode")) for ln in lines if _str_val(ln.get("barcode"))})
     skus = list({_str_val(ln.get("item_number")) for ln in lines if _str_val(ln.get("item_number"))})
     mfg_map = fetch_manufacturing_by_skus(skus) if skus else {}
 
+    cl_barcode_map = _fetch_cl_barcode_attrs(barcodes)
+    paas_map = fetch_paas_barcode_trx_by_barcodes(barcodes) if barcodes else {}
+    dup_map = fetch_duplicate_onhand_by_barcodes(barcodes) if barcodes else {}
+    sold_map = fetch_sold_onhand_by_barcodes(barcodes) if barcodes else {}
+
+    saas_loc_map, saas_loc_state = lookup_barcode_saas_location(barcodes)
+    saas_txn_map, saas_txn_state = lookup_barcode_saas_transaction(barcodes)
+
     inhouse_bags: dict[str, dict] = {}
     jw_grn_map: dict[str, dict] = {}
+    work_orders: list[dict] = []
     if hash_id and fusion_db_configured():
         inhouse_bags = fetch_inhouse_bag_by_order(hash_id)
         jw_grn_map = fetch_jw_grn_by_order(hash_id)
+        work_orders = fetch_work_orders_by_sales_order(hash_id)
 
     po_numbers = [
         _str_val(g.get("transaction_number"))
@@ -529,7 +764,6 @@ def _enrich_lines(header: dict, lines: list[dict]) -> tuple[list[dict], dict]:
     ]
     vendor_qc_map = _fetch_vendor_qc_by_pos(po_numbers) if po_numbers else {}
 
-    from .fusion_report import lookup_item_atp_wd_uom, soap_configured as fusion_soap_configured
     atp_map, atp_cache_state = lookup_item_atp_wd_uom(skus)
 
     enriched: list[dict] = []
@@ -585,11 +819,56 @@ def _enrich_lines(header: dict, lines: list[dict]) -> tuple[list[dict], dict]:
                 row["vendor_qc_status"] = qc.get("vendor_qc_status")
                 row["vendor_qc_status_time"] = qc.get("vendor_qc_status_time")
 
-        # Item ATP / Work Definition / UOM (Fusion BI report cache)
+        # Item ATP / Work Definition / UOM (Fusion BI report)
         item_status = atp_map.get(sku, {})
         row["atp_status"] = item_status.get("atp_status")
         row["wd_status"] = item_status.get("wd_status")
         row["uom_status"] = item_status.get("uom_status")
+
+        # CL barcode attributes
+        cl = cl_barcode_map.get(bc, {})
+        row["cl_location_name"] = cl.get("cl_location_name")
+        row["cl_transaction_type"] = cl.get("cl_transaction_type")
+        row["cl_barcode_status"] = cl.get("cl_barcode_status")
+        row["cl_transaction_status"] = cl.get("cl_transaction_status")
+        row["cl_barcode_updated_at"] = cl.get("cl_updated_at")
+
+        # PaaS barcode trx/loc
+        paas = paas_map.get(bc, {})
+        row["paas_organization_name"] = paas.get("organization_name")
+        row["paas_transaction_type"] = paas.get("transaction_type_name")
+        row["paas_barcode_status"] = paas.get("barcode_status")
+        row["paas_transaction_status"] = paas.get("transaction_status")
+        row["paas_last_update_date"] = paas.get("last_update_date")
+
+        # SaaS reports
+        saas_loc = saas_loc_map.get(bc, {})
+        saas_txn = saas_txn_map.get(bc, {})
+        row["saas_location_name"] = saas_loc.get("location_name")
+        row["saas_transaction_type"] = saas_txn.get("transaction_type")
+        row["saas_barcode_status"] = saas_txn.get("barcode_status")
+        row["saas_transaction_status"] = saas_txn.get("transaction_status")
+
+        row["location_mismatch"] = _detect_location_mismatch(
+            row.get("cl_location_name") or row.get("location_name"),
+            row.get("paas_organization_name"),
+            row.get("saas_location_name"),
+        )
+        row["transaction_mismatch"] = _detect_transaction_mismatch(
+            row.get("cl_transaction_type"),
+            row.get("cl_barcode_status"),
+            row.get("cl_transaction_status"),
+            row.get("paas_transaction_type"),
+            row.get("paas_barcode_status"),
+            row.get("paas_transaction_status"),
+            row.get("saas_transaction_type"),
+            row.get("saas_barcode_status"),
+            row.get("saas_transaction_status"),
+        )
+
+        dup_count = dup_map.get(bc)
+        row["duplicate_onhand_count"] = dup_count
+        row["sold_onhand_present"] = bc in sold_map
 
         enriched.append(_json_safe(row))
 
@@ -600,10 +879,17 @@ def _enrich_lines(header: dict, lines: list[dict]) -> tuple[list[dict], dict]:
         "jw_grn": bool(jw_grn_map),
         "vendor_qc": bool(vendor_qc_map),
         "item_atp_wd_uom": atp_cache_state,
+        "cl_barcode_attrs": bool(cl_barcode_map),
+        "paas_barcode_trx": bool(paas_map),
+        "saas_barcode_location": saas_loc_state,
+        "saas_barcode_transaction": saas_txn_state,
+        "duplicate_onhand": bool(dup_map),
+        "sold_onhand": bool(sold_map),
+        "work_orders": bool(work_orders),
         "fusion_db": fusion_db_configured(),
         "fusion_soap": fusion_soap_configured(),
     }
-    return enriched, integrations
+    return enriched, integrations, [_json_safe(wo) for wo in work_orders]
 
 
 def _lookup_header(order_number: str) -> Optional[dict]:
@@ -649,7 +935,7 @@ def validate_order(order_number: str) -> ValidationResult:
 
     entity_id = header["entity_id"]
     raw_lines = fetch_all(ORDER_LINES_SQL, {"entity_id": entity_id})
-    lines, integrations = _enrich_lines(header, raw_lines)
+    lines, integrations, work_orders = _enrich_lines(header, raw_lines)
     customer = _extract_customer(header, lines, order_number)
     checks = _run_pre_audit_checks(header, lines)
     all_passed = all(c.passed for c in checks)
@@ -681,6 +967,7 @@ def validate_order(order_number: str) -> ValidationResult:
         message=message,
         meta=meta,
         integrations=integrations,
+        work_orders=work_orders,
     )
 
 
