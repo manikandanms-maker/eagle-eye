@@ -62,6 +62,12 @@ def fetch_from_oic(order_id: str) -> dict:
     raise NotImplementedError("Plug the OIC endpoint here.")
 
 
+def fetch_from_magento(order_id: str) -> dict:
+    """Fetch live order snapshot from Magento read-replica."""
+    from .magento import fetch_order_raw
+    return fetch_order_raw(order_id)
+
+
 def _normalize_items(raw_items: list[dict]) -> list[Item]:
     items: list[Item] = []
     for entry in raw_items or []:
@@ -89,9 +95,21 @@ def normalize(raw: dict) -> Order:
     )
 
 
-def collect(order_id: str, source: str = "fixture") -> Order:
-    """Single entry point used by the engine/UI."""
-    if source == "oic":
+def collect(order_id: str, source: str = "auto") -> Order:
+    """Single entry point used by the engine/UI.
+
+    source:
+      auto     — Magento if DB configured, else fixture
+      magento  — live Magento read-replica
+      fixture  — local JSON fixtures
+      oic      — OIC REST stub
+    """
+    if source == "auto":
+        from .db import db_configured
+        source = "magento" if db_configured() else "fixture"
+    if source == "magento":
+        raw = fetch_from_magento(order_id)
+    elif source == "oic":
         raw = fetch_from_oic(order_id)
     else:
         raw = load_fixture(order_id)

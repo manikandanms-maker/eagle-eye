@@ -19,3 +19,8 @@ __pycache__/
 # Logs
 *.log
 logs/
+
+# Fusion report CSV cache (downloaded via SOAP)
+data/fusion_reports/*.csv
+data/fusion_reports/*.json
+data/fusion_reports/*.raw

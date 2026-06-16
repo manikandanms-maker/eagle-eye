@@ -67,7 +67,7 @@ def run_rules(order: Order) -> AuditResult:
     return AuditResult(order=order, findings=findings)
 
 
-def audit(order_id: str, source: str = "fixture") -> AuditResult:
+def audit(order_id: str, source: str = "auto") -> AuditResult:
     """Full pipeline entry point: collect -> run deterministic rules."""
     order = collect(order_id, source=source)
     return run_rules(order)

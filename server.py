@@ -27,10 +27,26 @@ from fastapi.staticfiles import StaticFiles
 from audit.engine import audit
 from audit.loader import list_order_ids
 from audit.reasoner import explain
+from audit.db import db_configured, DatabaseConfigError
+from audit.fusion_db import fusion_db_configured
+from audit.fusion_report import cache_status, refresh_report_cache, soap_configured
+from audit.magento import validate_order
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
 app = FastAPI(title="Eagle Eye", description="AI-powered order audit for CaratLane")
+
+
+@app.get("/api/health")
+def health():
+    return {
+        "status": "ok",
+        "magento_db": "configured" if db_configured() else "missing_password",
+        "fusion_db": "configured" if fusion_db_configured() else "missing_credentials",
+        "fusion_soap": "configured" if soap_configured() else "missing_credentials",
+        "fusion_report_cache": cache_status(),
+        "data_source": "magento" if db_configured() else "fixtures",
+    }
 
 
 @app.get("/api/orders")
@@ -38,12 +54,44 @@ def orders():
     return {"orders": list_order_ids()}
 
 
-@app.get("/api/audit/{order_id}")
-def audit_order(order_id: str):
+@app.get("/api/validate/{order_number}")
+def validate_order_endpoint(order_number: str):
+    """First-check: locate order in Magento and evaluate checklist criteria."""
     try:
-        result = audit(order_id)
+        result = validate_order(order_number)
+    except DatabaseConfigError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Magento query failed: {exc}")
+    if not result.found:
+        raise HTTPException(status_code=404, detail=result.message)
+    return result.to_dict()
+
+
+@app.get("/api/fusion-report/status")
+def fusion_report_status():
+    return cache_status()
+
+
+@app.post("/api/fusion-report/refresh")
+def fusion_report_refresh():
+    """Schedule Fusion BI report, download CSV, refresh ATP/WD/UOM cache (may take several minutes)."""
+    try:
+        return refresh_report_cache()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Fusion report refresh failed: {exc}")
+
+
+@app.get("/api/audit/{order_id}")
+def audit_order(order_id: str, source: str = "auto"):
+    try:
+        result = audit(order_id, source=source)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except DatabaseConfigError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Order fetch failed: {exc}")
     narrative = explain(result)
     return {
         "summary": result.summary(),
