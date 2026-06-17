@@ -122,40 +122,27 @@ WHERE sfo.entity_id = %(entity_id)s
 ORDER BY sfo.net_payable DESC, sfoi.item_id, sfoiq.id
 """
 
-INVOICE_BY_ORDER_SQL = """
+# caratlane_invoices is ~1.8M rows and ijq_id is NOT indexed, so the old derived-table
+# join JSON-parsed every row (~5s). It DOES have an index on order_id, so we filter by
+# ci.order_id = sfo.entity_id — the JSON_EXTRACT barcode transform then runs on only this
+# order's few invoices (~50ms).
+INVOICE_BARCODE_EXPR = (
+    "REPLACE(REPLACE(SUBSTRING_INDEX(SUBSTRING_INDEX("
+    "JSON_UNQUOTE(JSON_EXTRACT(ci.meta, '$.barcodeInfo')), '=>', 1), '{', -1), '\"', ''), '\\\\', '')"
+)
+INVOICE_BY_ORDER_SQL = f"""
 SELECT
   sfoiq.barcode,
   sfoiq.erp_status,
   ci.invoice_number,
-  ci.invoice_barcode,
-  CASE
-    WHEN ci.invoice_number IS NOT NULL THEN 'INVOICED'
-    ELSE 'PENDING_INVOICE'
-  END AS invoice_flag
+  {INVOICE_BARCODE_EXPR} AS invoice_barcode,
+  CASE WHEN ci.invoice_number IS NOT NULL THEN 'INVOICED' ELSE 'PENDING_INVOICE' END AS invoice_flag
 FROM sales_flat_order sfo
 JOIN sales_flat_order_item sfoi ON sfo.entity_id = sfoi.order_id
 JOIN sales_flat_order_item_qty sfoiq ON sfoiq.item_id = sfoi.item_id
-LEFT JOIN invoice_job_queue ijq ON ijq.order_id = sfo.entity_id
-LEFT JOIN (
-  SELECT
-    ci_inner.*,
-    REPLACE(
-      REPLACE(
-        SUBSTRING_INDEX(
-          SUBSTRING_INDEX(
-            JSON_UNQUOTE(JSON_EXTRACT(ci_inner.meta, '$.barcodeInfo')),
-            '=>',
-            1
-          ),
-          '{',
-          -1
-        ),
-        '"', ''
-      ),
-      '\\\\', ''
-    ) AS invoice_barcode
-  FROM caratlane_invoices ci_inner
-) ci ON ci.ijq_id = ijq.id AND ci.invoice_barcode = sfoiq.barcode
+LEFT JOIN caratlane_invoices ci
+       ON ci.order_id = sfo.entity_id
+      AND {INVOICE_BARCODE_EXPR} = sfoiq.barcode
 WHERE sfo.entity_id = %(entity_id)s
   AND TRIM(COALESCE(sfoiq.barcode, '')) <> ''
 ORDER BY sfoiq.barcode
@@ -200,8 +187,9 @@ SELECT
 FROM erp_barcode_attributes eba
 LEFT JOIN erp_location_master_dtl elmd
   ON elmd.location_code = eba.location_code
-WHERE TRIM(COALESCE(eba.stock_code, '')) <> ''
-  AND TRIM(eba.stock_code) IN ({placeholders})
+-- Match the raw indexed column (params are already trimmed). Wrapping the column in
+-- TRIM(...) disabled index_erp_barcode_attributes_on_stock_code and forced a full scan (~1.7s).
+WHERE eba.stock_code IN ({placeholders})
 """
 
 ELIGIBLE_ERP_STATUSES = frozenset({"On Hold", "Processing", "Dispatched"})

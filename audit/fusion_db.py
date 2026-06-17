@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Generator, Optional
@@ -56,6 +57,34 @@ def _resolve_wallet() -> Optional[Path]:
     return None
 
 
+# Native Oracle session pool — the ATP TLS handshake is ~300-450ms, so reusing
+# pooled sessions removes that cost from every manufacturing/inhouse lookup.
+_ORACLE_POOL_MAX = int(os.getenv("ORACLE_POOL_MAX", "8"))
+_oracle_pool = None
+_oracle_pool_lock = threading.Lock()
+
+
+def _get_oracle_pool():
+    global _oracle_pool
+    if _oracle_pool is not None:
+        return _oracle_pool
+    with _oracle_pool_lock:
+        if _oracle_pool is None:
+            import oracledb
+            # Mirror the proven direct-connect path: the full ORACLE_DSN descriptor
+            # does one-way TLS, so we pass ONLY user/password/dsn. Passing
+            # config_dir/wallet_location would force mTLS and prompt for the PEM passphrase.
+            wallet = _resolve_wallet()
+            if wallet is not None:
+                os.environ["TNS_ADMIN"] = str(wallet)
+            _oracle_pool = oracledb.create_pool(
+                user=_user(), password=_password(), dsn=_dsn(),
+                min=1, max=_ORACLE_POOL_MAX, increment=1,
+                getmode=oracledb.POOL_GETMODE_WAIT,
+            )
+    return _oracle_pool
+
+
 @contextmanager
 def get_connection() -> Generator[Any, None, None]:
     if not fusion_db_configured():
@@ -69,15 +98,20 @@ def get_connection() -> Generator[Any, None, None]:
             "oracledb is required for manufacturing lookups. pip install oracledb"
         ) from exc
 
-    wallet = _resolve_wallet()
-    if wallet is not None:
-        os.environ["TNS_ADMIN"] = str(wallet)
-
-    conn = oracledb.connect(user=_user(), password=_password(), dsn=_dsn())
+    conn = None
     try:
+        try:
+            conn = _get_oracle_pool().acquire()  # pooled session (fast path)
+        except Exception:
+            # fallback: direct connect if the pool can't be created
+            wallet = _resolve_wallet()
+            if wallet is not None:
+                os.environ["TNS_ADMIN"] = str(wallet)
+            conn = oracledb.connect(user=_user(), password=_password(), dsn=_dsn())
         yield conn
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()  # releases back to the pool (or closes the direct conn)
 
 
 def fetch_all(sql: str, params: Optional[dict] = None) -> list[dict]:

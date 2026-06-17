@@ -6,6 +6,8 @@ Credentials via environment (see .env.example):
 from __future__ import annotations
 
 import os
+import queue
+import threading
 from contextlib import contextmanager
 from typing import Any, Generator, Optional
 
@@ -52,38 +54,69 @@ def _port() -> int:
         return DEFAULT_PORT
 
 
+# Connection pool — reuse connections so we pay the TCP/TLS handshake once, not per
+# query. The Magento audit makes many sequential reads; pooling cuts seconds off it.
+_POOL_MAX = int(os.getenv("MAGENTO_POOL_MAX", "8"))
+_pool: "queue.Queue" = queue.Queue(maxsize=_POOL_MAX)
+_pool_lock = threading.Lock()
+
+
+def _new_conn():
+    import pymysql
+    from pymysql.cursors import DictCursor
+    return pymysql.connect(
+        host=_host(), port=_port(), user=_user(), password=_password(),
+        database=_database(), charset="utf8mb4", cursorclass=DictCursor,
+        connect_timeout=CONNECT_TIMEOUT, read_timeout=READ_TIMEOUT, autocommit=True,
+    )
+
+
+def _acquire():
+    try:
+        conn = _pool.get_nowait()
+    except queue.Empty:
+        return _new_conn()
+    try:
+        conn.ping(reconnect=True)  # revive idle/stale pooled connections
+        return conn
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return _new_conn()
+
+
+def _release(conn) -> None:
+    try:
+        _pool.put_nowait(conn)
+    except queue.Full:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 @contextmanager
 def get_connection() -> Generator[Any, None, None]:
-    """Open a read-only MySQL connection; closes on exit."""
+    """Acquire a pooled read-only MySQL connection; returns it to the pool on exit."""
     if not db_configured():
         raise DatabaseConfigError(
             "Magento DB not configured. Set MAGENTO_DB_PASSWORD in .env "
             f"(host={_host()}, db={_database()}, user={_user()})."
         )
     try:
-        import pymysql
-        from pymysql.cursors import DictCursor
+        import pymysql  # noqa: F401  (driver presence check)
     except ImportError as exc:
         raise RuntimeError(
             "pymysql is required for live Magento fetch. pip install pymysql"
         ) from exc
 
-    conn = pymysql.connect(
-        host=_host(),
-        port=_port(),
-        user=_user(),
-        password=_password(),
-        database=_database(),
-        charset="utf8mb4",
-        cursorclass=DictCursor,
-        connect_timeout=CONNECT_TIMEOUT,
-        read_timeout=READ_TIMEOUT,
-        autocommit=True,
-    )
+    conn = _acquire()
     try:
         yield conn
     finally:
-        conn.close()
+        _release(conn)
 
 
 def fetch_all(sql: str, params: Optional[dict] = None) -> list[dict]:

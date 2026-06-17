@@ -875,6 +875,13 @@ def lookup_item_atp_wd_uom(item_numbers: list[str], *, allow_refresh: bool = Fal
         missing = [sku for sku in cleaned if sku not in out]
 
     if missing:
+        # Per-item Fusion runReport is a slow synchronous SOAP call (~1-2s each). Only do
+        # it when explicitly opted in (allow_refresh) or FUSION_REPORT_SYNC_ON_MISS=1 —
+        # otherwise serve from cache and let /api/fusion-report/refresh fill it out-of-band,
+        # so the audit isn't blocked for seconds on a cold cache.
+        sync_on_miss = os.getenv("FUSION_REPORT_SYNC_ON_MISS", "").lower() in {"1", "true", "yes"}
+        if not (allow_refresh or sync_on_miss):
+            return out, ("partial_cache" if out else "cache_miss")
         per_item_errors = 0
         for sku in missing:
             try:
