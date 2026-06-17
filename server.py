@@ -30,11 +30,12 @@ from audit.reasoner import explain
 from audit.db import db_configured, DatabaseConfigError
 from audit.fusion_db import fusion_db_configured
 from audit.fusion_report import cache_status, refresh_report_cache, soap_configured
+from audit.google_chat import webhook_configured
 from audit.magento import validate_order
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
-app = FastAPI(title="Eagle Eye", description="AI-powered order audit for CaratLane")
+app = FastAPI(title="CEagle Eye", description="AI-powered order audit for CaratLane")
 
 
 @app.get("/api/health")
@@ -44,6 +45,7 @@ def health():
         "magento_db": "configured" if db_configured() else "missing_password",
         "fusion_db": "configured" if fusion_db_configured() else "missing_credentials",
         "fusion_soap": "configured" if soap_configured() else "missing_credentials",
+        "google_chat_webhook": "configured" if webhook_configured() else "disabled",
         "fusion_report_cache": cache_status(),
         "data_source": "magento" if db_configured() else "fixtures",
     }

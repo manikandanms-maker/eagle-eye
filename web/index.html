@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Eagle Eye · CaratLane</title>
+  <title>CEagle Eye · CaratLane</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=5" />
 </head>
 <body>
   <div class="app">
@@ -15,15 +15,13 @@
       <div class="brand">
         <span class="brand-logo">🦅</span>
         <div class="brand-text">
-          <span class="brand-name">Eagle&nbsp;Eye</span>
+          <span class="brand-name">CEagle&nbsp;Eye</span>
           <span class="brand-sub">CaratLane</span>
         </div>
       </div>
 
       <nav class="nav">
         <a class="nav-item active" href="#"><span class="ni-icon">🛡️</span> Order Audit</a>
-        <a class="nav-item" href="#rules"><span class="ni-icon">📋</span> Rule Catalog</a>
-        <a class="nav-item" href="#how"><span class="ni-icon">⚙️</span> How it works</a>
       </nav>
 
       <div class="sidebar-foot">
@@ -69,9 +67,19 @@
             <span id="validationMeta" class="muted"></span>
           </div>
           <div id="validationSummary" class="validation-summary"></div>
+          <div id="checkSummary" class="check-summary hidden"></div>
+          <div id="checkFilters" class="check-filters hidden"></div>
           <div id="customerCard" class="customer-card hidden"></div>
           <!-- checklist sections render dynamically, one per module returned -->
           <div id="checklists"></div>
+          <details class="raw-card hidden" id="mfgReservationWrap">
+            <summary>🔒 Manufacturing barcode reservation (<span id="mfgReservationMeta">0</span>)</summary>
+            <div id="mfgReservation"></div>
+          </details>
+          <details class="raw-card hidden" id="jwQcGrnWrap">
+            <summary>🧪 JW Vendor QC &amp; GRN (<span id="jwQcGrnMeta">0</span>)</summary>
+            <div id="jwQcGrn"></div>
+          </details>
           <details class="raw-card hidden" id="workOrdersWrap">
             <summary>🏭 Work orders (Fusion)</summary>
             <div id="workOrders"></div>
@@ -133,6 +141,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=11"></script>
 </body>
 </html>

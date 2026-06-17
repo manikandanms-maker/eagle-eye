@@ -65,15 +65,16 @@ WHERE esfo.order_id = %(entity_id)s
 LIMIT 1
 """
 
-ORDER_LINES_SQL = """
+ELIGIBLE_ERP_STATUSES = frozenset({
+    "On Hold", "Processing", "Dispatched", "Cancelled", "Canceled",
+})
+_LINE_BARCODE_FILTER = "AND sfoiq.barcode IS NOT NULL AND sfoiq.barcode <> ''"
+
+ORDER_LINES_SQL = f"""
 SELECT
   elmd.location_name,
-  esfo.order_id,
   sfo.entity_id,
-  sfo.hash_id,
-  sfo.net_payable,
   sfoi.sku_size AS item_number,
-  --sfoi.sku_size,
   sfoi.name,
   sfoi.order_processing_type,
   sfoiq.barcode,
@@ -81,32 +82,18 @@ SELECT
   sfoiq.tax,
   sfoiq.final_price,
   sfoiq.tax_breakup,
-  sfo.fusion_party_number,
-  sfo.customer_firstname,
-  sfo.customer_lastname,
   sfoa.email AS shipping_email,
-  sfo.billing_address_id,
-  sfoi.invoice_mode,
-  sfo.source,
   elmd.pan_no,
-  elmd.gstin_no,
-  sfoiq.barcode_source_location,
   sfoiqai.barcode_reservation_id,
   sfoiqai.barcode_reserved_in_fusion,
   sfoi.price_breakup,
   sfoi.expected_delivery_date_min,
   sfoi.expected_delivery_date_max,
   sfoi.erp_doc_no,
-  sfoi.is_pushed AS item_is_pushed,
-  sfoi.is_payment_updated,
-  sfoi.financial_approval,
-  sfoi.order_type AS item_order_type,
   sfoi.discount_breakups,
   sfoiq.erp_status,
   sfoiqai.manual_dispatch_status,
-  sfoiqai.final_delivery_date,
   sfoiqai.pick_status,
-  sfoa.fusion_address_id,
   sfoi.item_id,
   sfoiq.id AS qty_id
 FROM sales_flat_order sfo
@@ -115,36 +102,49 @@ JOIN sales_flat_order_item_qty sfoiq ON sfoiq.item_id = sfoi.item_id
 JOIN sales_flat_order_item_qty_additional_infos sfoiqai ON sfoiqai.qty_id = sfoiq.id
 LEFT JOIN sales_flat_order_address sfoa
   ON sfoa.parent_id = sfo.entity_id AND sfoa.address_type = 'shipping'
-LEFT JOIN erp_sales_flat_order esfo ON esfo.order_id = sfo.entity_id
 LEFT JOIN erp_location_master_dtl elmd ON elmd.location_id = sfoiq.shipping_location_id
 WHERE sfo.entity_id = %(entity_id)s
-  AND TRIM(COALESCE(sfoiq.barcode, '')) <> ''
-ORDER BY sfo.net_payable DESC, sfoi.item_id, sfoiq.id
+  {_LINE_BARCODE_FILTER}
+ORDER BY sfoi.item_id, sfoiq.id
 """
 
-# caratlane_invoices is ~1.8M rows and ijq_id is NOT indexed, so the old derived-table
-# join JSON-parsed every row (~5s). It DOES have an index on order_id, so we filter by
-# ci.order_id = sfo.entity_id — the JSON_EXTRACT barcode transform then runs on only this
-# order's few invoices (~50ms).
-INVOICE_BARCODE_EXPR = (
-    "REPLACE(REPLACE(SUBSTRING_INDEX(SUBSTRING_INDEX("
-    "JSON_UNQUOTE(JSON_EXTRACT(ci.meta, '$.barcodeInfo')), '=>', 1), '{', -1), '\"', ''), '\\\\', '')"
-)
+# Invoice numbers come from caratlane_invoices.meta.itemIds (JSON array), joined per
+# sales_flat_order_item_qty.item_id — not barcodeInfo parsing.
 INVOICE_BY_ORDER_SQL = f"""
 SELECT
+  sfo.hash_id,
+  sfoiq.item_id,
   sfoiq.barcode,
   sfoiq.erp_status,
   ci.invoice_number,
-  {INVOICE_BARCODE_EXPR} AS invoice_barcode,
-  CASE WHEN ci.invoice_number IS NOT NULL THEN 'INVOICED' ELSE 'PENDING_INVOICE' END AS invoice_flag
+  ci.pop_id,
+  CASE
+    WHEN ci.invoice_number IS NOT NULL THEN 'INVOICED'
+    ELSE 'PENDING_INVOICE'
+  END AS invoice_flag
 FROM sales_flat_order sfo
-JOIN sales_flat_order_item sfoi ON sfo.entity_id = sfoi.order_id
-JOIN sales_flat_order_item_qty sfoiq ON sfoiq.item_id = sfoi.item_id
-LEFT JOIN caratlane_invoices ci
-       ON ci.order_id = sfo.entity_id
-      AND {INVOICE_BARCODE_EXPR} = sfoiq.barcode
+JOIN sales_flat_order_item sfoi
+  ON sfoi.order_id = sfo.entity_id
+JOIN sales_flat_order_item_qty sfoiq
+  ON sfoiq.item_id = sfoi.item_id
+LEFT JOIN (
+  SELECT
+    ci.invoice_number,
+    jt.item_id,
+    JSON_UNQUOTE(JSON_EXTRACT(ci.meta, '$.popReceiptDetails.popIds[0]')) AS pop_id
+  FROM caratlane_invoices ci
+  CROSS JOIN JSON_TABLE(
+    JSON_EXTRACT(ci.meta, '$.itemIds'),
+    '$[*]' COLUMNS (
+      item_id BIGINT PATH '$'
+    )
+  ) jt
+  WHERE JSON_EXTRACT(ci.meta, '$.itemIds') IS NOT NULL
+    AND ci.order_id = %(entity_id)s
+) ci
+  ON ci.item_id = sfoiq.item_id
 WHERE sfo.entity_id = %(entity_id)s
-  AND TRIM(COALESCE(sfoiq.barcode, '')) <> ''
+  {_LINE_BARCODE_FILTER}
 ORDER BY sfoiq.barcode
 """
 
@@ -176,6 +176,34 @@ ORDER BY STR_TO_DATE(
 ) DESC
 """
 
+VENDOR_QC_BY_BARCODES_SQL = """
+SELECT
+  ipoiq.barcode,
+  ipoiq.po_number,
+  k.status_name,
+  JSON_UNQUOTE(
+    JSON_EXTRACT(
+      ipoiq.status_update_time_stamp,
+      CONCAT('$.', JSON_QUOTE(k.status_name))
+    )
+  ) AS status_time
+FROM indus_purchase_orders_item_qty ipoiq
+CROSS JOIN JSON_TABLE(
+  JSON_KEYS(ipoiq.status_update_time_stamp),
+  '$[*]' COLUMNS (status_name VARCHAR(100) PATH '$')
+) k
+WHERE ipoiq.barcode IN ({placeholders})
+ORDER BY STR_TO_DATE(
+  JSON_UNQUOTE(
+    JSON_EXTRACT(
+      ipoiq.status_update_time_stamp,
+      CONCAT('$.', JSON_QUOTE(k.status_name))
+    )
+  ),
+  '%%Y-%%m-%%d %%H:%%i:%%s'
+) DESC
+"""
+
 BARCODE_ATTR_BY_BARCODES_SQL = """
 SELECT
   TRIM(eba.stock_code) AS stock_code,
@@ -192,7 +220,8 @@ LEFT JOIN erp_location_master_dtl elmd
 WHERE eba.stock_code IN ({placeholders})
 """
 
-ELIGIBLE_ERP_STATUSES = frozenset({"On Hold", "Processing", "Dispatched"})
+# Fields omitted from API payload (large JSON blobs; validated server-side only).
+_LINE_API_OMIT = frozenset({"price_breakup", "tax_breakup", "discount_breakups"})
 
 
 @dataclass
@@ -204,6 +233,7 @@ class CheckResult:
     expected: str
     actual: str
     detail: str = ""
+    action: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -214,6 +244,7 @@ class CheckResult:
             "expected": self.expected,
             "actual": self.actual,
             "detail": self.detail,
+            "action": self.action,
         }
 
 
@@ -247,7 +278,7 @@ class ValidationResult:
             "checks": [c.to_dict() for c in self.checks],
             "customer": _json_safe(self.customer),
             "header": _json_safe(self.header),
-            "lines": [_json_safe(row) for row in self.lines],
+            "lines": [_json_safe(_slim_line(row)) for row in self.lines],
             "line_count": self.line_count,
             "message": self.message,
             "meta": self.meta,
@@ -272,6 +303,11 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     return value
+
+
+def _slim_line(row: dict) -> dict:
+    """Drop bulky JSON columns from API/UI line payload."""
+    return {k: v for k, v in row.items() if k not in _LINE_API_OMIT}
 
 
 def _str_val(value: Any) -> str:
@@ -391,7 +427,7 @@ def _check_erp_status(header: dict, lines: list[dict]) -> CheckResult:
         passed=len(eligible) > 0 and len(eligible) == len(lines),
         expected=f"erp_status in {sorted(ELIGIBLE_ERP_STATUSES)}",
         actual=status_summary,
-        detail="Only On Hold / Processing / Dispatched lines are in the first-check scope.",
+        detail="On Hold, Processing, Dispatched, and Cancelled lines are in scope.",
     )
 
 
@@ -420,6 +456,11 @@ def _norm_token(value: Any) -> str:
     return re.sub(r"\s+", " ", _str_val(value).upper())
 
 
+def _atp_field_value(item_status: dict, key: str) -> str:
+    val = _str_val(item_status.get(key))
+    return val if val else "MISSING"
+
+
 def _values_match(a: Any, b: Any) -> bool:
     left, right = _norm_token(a), _norm_token(b)
     if not left or not right:
@@ -436,14 +477,20 @@ _TXN_TYPE_ALIASES = {
 
 
 def _txn_types_align(a: Any, b: Any) -> bool:
-    left, right = _norm_token(a), _norm_token(b)
-    if not left or not right:
+    from .fusion_report import transaction_type_to_code
+
+    raw_l, raw_r = _norm_token(a), _norm_token(b)
+    if not raw_l or not raw_r:
         return True
-    if _values_match(left, right):
+    code_l = transaction_type_to_code(a)
+    code_r = transaction_type_to_code(b)
+    if code_l and code_r and code_l == code_r:
         return True
-    left_full = _TXN_TYPE_ALIASES.get(left, left)
-    right_full = _TXN_TYPE_ALIASES.get(right, right)
-    return _values_match(left_full, right_full)
+    if _values_match(raw_l, raw_r):
+        return True
+    left_full = _TXN_TYPE_ALIASES.get(raw_l, raw_l)
+    right_full = _TXN_TYPE_ALIASES.get(raw_r, raw_r)
+    return _values_match(left_full, right_full) or _values_match(code_l, code_r)
 
 
 def _check_expected_delivery_dates(header: dict, lines: list[dict]) -> CheckResult:
@@ -463,17 +510,6 @@ def _check_expected_delivery_dates(header: dict, lines: list[dict]) -> CheckResu
         actual=f"{len(lines) - len(missing)}/{len(lines)} lines complete"
         if lines else "no lines",
         detail="Both EDD min and max must be present for each barcode line.",
-    )
-
-
-def _check_fusion_party(header: dict, lines: list[dict]) -> CheckResult:
-    party = _str_val(header.get("fusion_party_number")
-                     or (lines[0].get("fusion_party_number") if lines else ""))
-    return CheckResult(
-        name="fusion_party_number", label="Fusion party number", module="CUSTOMER",
-        passed=bool(party),
-        expected="non-empty fusion_party_number", actual=party or "empty",
-        detail="Customer must be linked to an ERP Fusion party for billing sync.",
     )
 
 
@@ -655,7 +691,6 @@ PRE_AUDIT_RULES: list[Callable[[dict, list[dict]], CheckResult]] = [
     _check_expected_delivery_dates,
     _check_customer_name,
     _check_customer_email,
-    _check_fusion_party,
     _check_barcode_location_sync,
     _check_barcode_transaction_sync,
     _check_no_duplicate_onhand,
@@ -683,27 +718,32 @@ def _run_pre_audit_checks(header: dict, lines: list[dict]) -> list[CheckResult]:
 
 
 def _fetch_invoice_map(entity_id: int) -> dict[str, dict]:
-    """Barcode -> invoice fields (best row per barcode, prefer INVOICED)."""
+    """item_id / barcode -> invoice fields from caratlane_invoices.meta.itemIds."""
     rows = fetch_all(INVOICE_BY_ORDER_SQL, {"entity_id": entity_id})
-    by_barcode: dict[str, dict] = {}
+    out: dict[str, dict] = {}
     for row in rows:
-        bc = _str_val(row.get("barcode"))
-        if not bc:
-            continue
         inv_num = row.get("invoice_number")
         entry = {
             "invoice_number": inv_num,
-            "invoice_barcode": row.get("invoice_barcode"),
             "invoice_flag": row.get("invoice_flag"),
+            "pop_id": row.get("pop_id"),
         }
-        existing = by_barcode.get(bc)
-        if not existing or (inv_num and not existing.get("invoice_number")):
-            by_barcode[bc] = entry
-    return by_barcode
+        item_id = row.get("item_id")
+        if item_id is not None:
+            key = str(item_id)
+            existing = out.get(key)
+            if not existing or (inv_num and not existing.get("invoice_number")):
+                out[key] = entry
+        bc = _str_val(row.get("barcode"))
+        if bc:
+            existing = out.get(bc)
+            if not existing or (inv_num and not existing.get("invoice_number")):
+                out[bc] = entry
+    return out
 
 
 def _fetch_vendor_qc_by_pos(po_numbers: list[str]) -> dict[tuple[str, str], dict]:
-    """Latest Vendor QC status per (barcode, po_number) from Magento."""
+    """Latest Vendor QC status per (barcode, po_number) from Magento indus_purchase_orders_item_qty."""
     cleaned = sorted({_str_val(p) for p in po_numbers if _str_val(p)})
     if not cleaned or not db_configured():
         return {}
@@ -729,6 +769,68 @@ def _fetch_vendor_qc_by_pos(po_numbers: list[str]) -> dict[tuple[str, str], dict
     except Exception:
         return out
     return out
+
+
+def _fetch_vendor_qc_by_barcodes(barcodes: list[str]) -> dict[str, dict]:
+    """Latest Vendor QC status per barcode (fallback when PO is unknown)."""
+    cleaned = sorted({_str_val(b) for b in barcodes if _str_val(b)})
+    if not cleaned or not db_configured():
+        return {}
+
+    placeholders = ", ".join(f"%(bc{i})s" for i in range(len(cleaned)))
+    params = {f"bc{i}": v for i, v in enumerate(cleaned)}
+    sql = VENDOR_QC_BY_BARCODES_SQL.format(placeholders=placeholders)
+
+    out: dict[str, dict] = {}
+    try:
+        rows = fetch_all(sql, params)
+        for row in rows:
+            bc = _str_val(row.get("barcode"))
+            if not bc or bc in out:
+                continue
+            out[bc] = {
+                "vendor_qc_status": row.get("status_name"),
+                "vendor_qc_status_time": row.get("status_time"),
+                "po_number": row.get("po_number"),
+            }
+    except Exception:
+        return out
+    return out
+
+
+def _collect_po_numbers(jw_grn_map: dict, work_orders: list[dict]) -> list[str]:
+    """PO numbers from Fusion GRN transaction_number and work-order ATTRIBUTE_CHAR5."""
+    pos: set[str] = set()
+    for grn in jw_grn_map.values():
+        po = _str_val(grn.get("transaction_number"))
+        if po:
+            pos.add(po)
+    for wo in work_orders:
+        po = _str_val(wo.get("po_number"))
+        if po:
+            pos.add(po)
+    return sorted(pos)
+
+
+def _resolve_vendor_qc(
+    barcode: str,
+    po_candidates: list[str],
+    vendor_qc_map: dict[tuple[str, str], dict],
+) -> dict:
+    """Match Vendor QC App row for barcode using PO(s) from JW / Buy path."""
+    bc = _str_val(barcode)
+    if not bc:
+        return {}
+    seen: set[str] = set()
+    for po in po_candidates:
+        po = _str_val(po)
+        if not po or po in seen:
+            continue
+        seen.add(po)
+        hit = vendor_qc_map.get((bc, po))
+        if hit:
+            return {**hit, "po_number": po}
+    return {}
 
 
 def _fetch_cl_barcode_attrs(barcodes: list[str]) -> dict[str, dict]:
@@ -799,6 +901,7 @@ def _detect_transaction_mismatch(
     type_pairs = [
         (cl_type, paas_type),
         (cl_type, saas_type),
+        (paas_type, saas_type),
     ]
     for left, right in type_pairs:
         if _norm_token(left) and _norm_token(right) and not _txn_types_align(left, right):
@@ -823,6 +926,7 @@ def _enrich_lines(header: dict, lines: list[dict]) -> tuple[list[dict], dict, li
         lookup_barcode_saas_transaction,
         lookup_item_atp_wd_uom,
         soap_configured as fusion_soap_configured,
+        transaction_type_to_code,
     )
 
     entity_id = header.get("entity_id")
@@ -832,6 +936,12 @@ def _enrich_lines(header: dict, lines: list[dict]) -> tuple[list[dict], dict, li
     barcodes = list({_str_val(ln.get("barcode")) for ln in lines if _str_val(ln.get("barcode"))})
     skus = list({_str_val(ln.get("item_number")) for ln in lines if _str_val(ln.get("item_number"))})
     mfg_map = fetch_manufacturing_by_skus(skus) if skus else {}
+    needs_inhouse = any(
+        _str_val(m.get("manufacturing_type")) == "Inhouse" for m in mfg_map.values()
+    )
+    needs_jw = any(
+        _str_val(m.get("manufacturing_type")) == "JW" for m in mfg_map.values()
+    )
 
     cl_barcode_map = _fetch_cl_barcode_attrs(barcodes)
     paas_map = fetch_paas_barcode_trx_by_barcodes(barcodes) if barcodes else {}
@@ -845,18 +955,22 @@ def _enrich_lines(header: dict, lines: list[dict]) -> tuple[list[dict], dict, li
     jw_grn_map: dict[str, dict] = {}
     work_orders: list[dict] = []
     if hash_id and fusion_db_configured():
-        inhouse_bags = fetch_inhouse_bag_by_order(hash_id)
-        jw_grn_map = fetch_jw_grn_by_order(hash_id)
+        if needs_inhouse:
+            inhouse_bags = fetch_inhouse_bag_by_order(hash_id)
+        if needs_jw:
+            jw_grn_map = fetch_jw_grn_by_order(hash_id)
         work_orders = fetch_work_orders_by_sales_order(hash_id)
 
-    po_numbers = [
-        _str_val(g.get("transaction_number"))
-        for g in jw_grn_map.values()
-        if _str_val(g.get("transaction_number"))
-    ]
+    po_numbers = _collect_po_numbers(jw_grn_map, work_orders)
     vendor_qc_map = _fetch_vendor_qc_by_pos(po_numbers) if po_numbers else {}
+    jw_barcodes = [
+        _str_val(ln.get("barcode"))
+        for ln in lines
+        if _str_val(ln.get("barcode"))
+    ]
+    vendor_qc_by_barcode = _fetch_vendor_qc_by_barcodes(jw_barcodes) if jw_barcodes else {}
 
-    atp_map, atp_cache_state = lookup_item_atp_wd_uom(skus)
+    atp_map, atp_cache_state = lookup_item_atp_wd_uom(skus, sync_on_miss=True)
 
     enriched: list[dict] = []
     for ln in lines:
@@ -865,18 +979,16 @@ def _enrich_lines(header: dict, lines: list[dict]) -> tuple[list[dict], dict, li
         erp = _str_val(row.get("erp_status"))
         sku = _str_val(row.get("item_number"))
 
-        # Invoice (primarily for Dispatched)
-        inv = invoice_map.get(bc, {})
-        if erp == "Dispatched":
-            row["invoice_number"] = inv.get("invoice_number")
-            row["invoice_barcode"] = inv.get("invoice_barcode")
-            row["invoice_flag"] = inv.get("invoice_flag") or (
-                "PENDING_INVOICE" if bc else None
-            )
-        else:
-            row["invoice_number"] = inv.get("invoice_number")
-            row["invoice_barcode"] = inv.get("invoice_barcode")
-            row["invoice_flag"] = inv.get("invoice_flag")
+        # Invoice via caratlane_invoices.meta.itemIds → item_id
+        item_id = row.get("item_id")
+        inv = invoice_map.get(str(item_id)) if item_id is not None else {}
+        if not inv:
+            inv = invoice_map.get(bc, {})
+        row["invoice_number"] = inv.get("invoice_number")
+        row["invoice_flag"] = inv.get("invoice_flag") or (
+            "PENDING_INVOICE" if bc and erp == "Dispatched" else inv.get("invoice_flag")
+        )
+        row["pop_id"] = inv.get("pop_id")
 
         # Manufacturing type from Fusion (by SKU / item_number)
         mfg = mfg_map.get(sku, {})
@@ -899,28 +1011,50 @@ def _enrich_lines(header: dict, lines: list[dict]) -> tuple[list[dict], dict, li
             row["loss_stock_value"] = bag.get("loss_stock_value")
             row["bag_last_update"] = bag.get("bag_last_update")
 
-        # JW vendor: GRN (Fusion) + Vendor QC (Magento, PO = transaction_number)
+        # JW vendor: GRN (Fusion) + Vendor QC (Magento indus_purchase_orders_item_qty by PO)
         if mtype == "JW":
             grn = jw_grn_map.get(bc, {})
-            po = _str_val(grn.get("transaction_number"))
-            row["grn_transaction_number"] = po or None
-            row["grn_status"] = grn.get("grn_status")
+            wo_pos = [_str_val(wo.get("po_number")) for wo in work_orders if _str_val(wo.get("po_number"))]
+            grn_po = _str_val(grn.get("transaction_number"))
+            po_candidates = [grn_po] + wo_pos + po_numbers
+            qc = _resolve_vendor_qc(bc, po_candidates, vendor_qc_map)
+            if not qc:
+                qc = vendor_qc_by_barcode.get(bc, {})
+            po_used = _str_val(qc.get("po_number")) or grn_po or (wo_pos[0] if wo_pos else "")
+            row["po_number"] = po_used or "MISSING"
+            row["grn_transaction_number"] = grn_po or po_used or None
+            row["grn_status"] = grn.get("grn_status") or "MISSING"
             row["grn_gross_weight"] = grn.get("gross_weight")
-            if po:
-                qc = vendor_qc_map.get((bc, po), {})
-                row["vendor_qc_status"] = qc.get("vendor_qc_status")
-                row["vendor_qc_status_time"] = qc.get("vendor_qc_status_time")
+            row["vendor_qc_status"] = qc.get("vendor_qc_status") or "MISSING"
+            row["vendor_qc_status_time"] = qc.get("vendor_qc_status_time") or None
+        elif mtype == "Inhouse":
+            row["po_number"] = None
+            row["vendor_qc_status"] = None
+            row["vendor_qc_status_time"] = None
+            row["grn_transaction_number"] = None
+            row["grn_status"] = None
+            row["grn_gross_weight"] = None
 
         # Item ATP / Work Definition / UOM (Fusion BI report)
         item_status = atp_map.get(sku, {})
-        row["atp_status"] = item_status.get("atp_status")
-        row["wd_status"] = item_status.get("wd_status")
-        row["uom_status"] = item_status.get("uom_status")
+        if sku and sku in atp_map:
+            row["atp_status"] = _atp_field_value(item_status, "atp_status")
+            row["wd_status"] = _atp_field_value(item_status, "wd_status")
+            row["uom_status"] = _atp_field_value(item_status, "uom_status")
+        elif sku:
+            row["atp_status"] = "MISSING"
+            row["wd_status"] = "MISSING"
+            row["uom_status"] = "MISSING"
+        else:
+            row["atp_status"] = None
+            row["wd_status"] = None
+            row["uom_status"] = None
 
         # CL barcode attributes
         cl = cl_barcode_map.get(bc, {})
         row["cl_location_name"] = cl.get("cl_location_name")
-        row["cl_transaction_type"] = cl.get("cl_transaction_type")
+        cl_txn = cl.get("cl_transaction_type")
+        row["cl_transaction_type"] = transaction_type_to_code(cl_txn) or cl_txn
         row["cl_barcode_status"] = cl.get("cl_barcode_status")
         row["cl_transaction_status"] = cl.get("cl_transaction_status")
         row["cl_barcode_updated_at"] = cl.get("cl_updated_at")
@@ -928,7 +1062,8 @@ def _enrich_lines(header: dict, lines: list[dict]) -> tuple[list[dict], dict, li
         # PaaS barcode trx/loc
         paas = paas_map.get(bc, {})
         row["paas_organization_name"] = paas.get("organization_name")
-        row["paas_transaction_type"] = paas.get("transaction_type_name")
+        paas_txn = paas.get("transaction_type_name")
+        row["paas_transaction_type"] = transaction_type_to_code(paas_txn) or paas_txn
         row["paas_barcode_status"] = paas.get("barcode_status")
         row["paas_transaction_status"] = paas.get("transaction_status")
         row["paas_last_update_date"] = paas.get("last_update_date")
@@ -959,7 +1094,7 @@ def _enrich_lines(header: dict, lines: list[dict]) -> tuple[list[dict], dict, li
         )
 
         dup_count = dup_map.get(bc)
-        row["duplicate_onhand_count"] = dup_count
+        row["duplicate_onhand_count"] = dup_count if dup_count is not None else 0
         row["sold_onhand_present"] = bc in sold_map
 
         enriched.append(_json_safe(row))
@@ -982,6 +1117,87 @@ def _enrich_lines(header: dict, lines: list[dict]) -> tuple[list[dict], dict, li
         "fusion_soap": fusion_soap_configured(),
     }
     return enriched, integrations, [_json_safe(wo) for wo in work_orders]
+
+
+def _fetch_finance_for_sop(lines: list[dict], work_orders: list[dict]) -> dict:
+    from .fusion_report import fetch_finance_saas_batch
+
+    ar_invoices = [_str_val(ln.get("invoice_number")) for ln in lines]
+    ap_invoices = [_str_val(wo.get("invoice_number")) for wo in work_orders]
+    wo_nums = [_str_val(wo.get("work_order_number")) for wo in work_orders]
+    return fetch_finance_saas_batch(ar_invoices, ap_invoices, wo_nums)
+
+
+def _attach_finance_data(
+    lines: list[dict],
+    work_orders: list[dict],
+    finance: dict,
+) -> tuple[list[dict], list[dict]]:
+    from datetime import date
+
+    ar_map = finance.get("ar_by_invoice") or {}
+    ap_map = finance.get("ap_by_invoice") or {}
+    rm_map = finance.get("rm_by_wo") or {}
+
+    for ln in lines:
+        inv = _str_val(ln.get("invoice_number"))
+        if inv and inv in ar_map:
+            ar = ar_map[inv]
+            ln["ar_status"] = ar.get("invoice_status") or ar.get("status") or "MISSING"
+            ln["ar_amount_due_remaining"] = ar.get("amount_due_remaining")
+            ln["ar_found"] = ar.get("found")
+        elif inv:
+            ln["ar_status"] = "NOT FOUND"
+            ln["ar_found"] = False
+
+    for wo in work_orders:
+        inv = _str_val(wo.get("invoice_number"))
+        if inv and inv in ap_map:
+            ap = ap_map[inv]
+            wo["ap_payment_status"] = ap.get("payment_status") or "MISSING"
+            wo["ap_ledger_id"] = ap.get("ledger_id") or "MISSING"
+            wo["ap_balance_amount"] = ap.get("balance_amount")
+            wo["ap_found"] = ap.get("found")
+        elif inv:
+            wo["ap_payment_status"] = "NOT FOUND"
+            wo["ap_ledger_id"] = "NOT FOUND"
+            wo["ap_found"] = False
+
+        won = _str_val(wo.get("work_order_number"))
+        if won and won in rm_map:
+            rm = rm_map[won]
+            wo["rm_consumed"] = rm.get("consumed")
+            wo["rm_row_count"] = rm.get("row_count")
+
+        mfg = _str_val(wo.get("manufacturing_type")).upper()
+        # wo_completion_status — disabled until Fusion actual-completion signal is wired
+        # if mfg in {"JOB WORK", "JW"}:
+        #     planned_end = wo.get("planned_completion_date")
+        #     ...
+        if not inv and mfg in {"JOB WORK", "JW"}:
+            wo["ap_payment_status"] = wo.get("ap_payment_status") or "NO AP INVOICE"
+            wo["ap_ledger_id"] = wo.get("ap_ledger_id") or "NO AP INVOICE"
+        elif not inv:
+            wo["ap_payment_status"] = "N/A"
+            wo["ap_ledger_id"] = "N/A"
+            wo["ap_balance_amount"] = None
+
+    return lines, work_orders
+
+
+def _apply_header_to_lines(header: dict, lines: list[dict]) -> None:
+    """Copy header fields onto each line (kept out of ORDER_LINES_SQL for a leaner query)."""
+    defaults = {
+        "hash_id": header.get("hash_id"),
+        "net_payable": header.get("net_payable"),
+        "fusion_party_number": header.get("fusion_party_number"),
+        "customer_firstname": header.get("customer_firstname"),
+        "customer_lastname": header.get("customer_lastname"),
+        "source": header.get("source"),
+    }
+    for ln in lines:
+        for key, val in defaults.items():
+            ln.setdefault(key, val)
 
 
 def _lookup_header(order_number: str) -> Optional[dict]:
@@ -1027,9 +1243,16 @@ def validate_order(order_number: str) -> ValidationResult:
 
     entity_id = header["entity_id"]
     raw_lines = fetch_all(ORDER_LINES_SQL, {"entity_id": entity_id})
+    _apply_header_to_lines(header, raw_lines)
     lines, integrations, work_orders = _enrich_lines(header, raw_lines)
+    finance = _fetch_finance_for_sop(lines, work_orders)
+    lines, work_orders = _attach_finance_data(lines, work_orders, finance)
+    integrations["saas_finance"] = finance.get("enabled", False)
+
     customer = _extract_customer(header, lines, order_number)
     checks = _run_pre_audit_checks(header, lines)
+    from .sop_checks import run_sop_checks
+    checks.extend(run_sop_checks(header, lines, work_orders, finance))
     all_passed = all(c.passed for c in checks)
 
     hash_id = _str_val(header.get("hash_id")) or None
@@ -1044,7 +1267,7 @@ def validate_order(order_number: str) -> ValidationResult:
         failed = [c.label for c in checks if not c.passed]
         message = f"Order {order_number} found but failed: {', '.join(failed)}."
 
-    return ValidationResult(
+    result = ValidationResult(
         order_number=order_number,
         found=True,
         valid=all_passed,
@@ -1061,6 +1284,14 @@ def validate_order(order_number: str) -> ValidationResult:
         integrations=integrations,
         work_orders=work_orders,
     )
+
+    try:
+        from .google_chat import notify_validation_result
+        notify_validation_result(result)
+    except Exception:
+        pass
+
+    return result
 
 
 def rows_to_raw_order(header: dict, lines: list[dict]) -> dict:

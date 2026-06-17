@@ -279,8 +279,13 @@ def fetch_jw_grn_by_order(sales_order_no: str) -> dict[str, dict]:
             bc = str(row.get("BARCODE") or "").strip()
             if not bc:
                 continue
-            txn = row.get("TRANSACTION_NUMBER")
-            existing = out.get(bc)
+            entry = {
+                "transaction_number": row.get("TRANSACTION_NUMBER"),
+                "grn_status": row.get("GRN_STATUS"),
+                "gross_weight": row.get("GROSS_WEIGHT"),
+            }
+            if bc not in out:
+                out[bc] = entry
     except Exception:
         return out
     return out

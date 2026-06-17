@@ -40,10 +40,19 @@ DEFAULT_REPORT_PATH = (
     "/Custom/Extraction Reports/ITEM ATP WD UOM STATUS/item_wd_atp_uom.xdo"
 )
 DEFAULT_LOCATION_REPORT_PATH = (
-    "/Custom/Extraction Reports/SaaS_location_barcode_praveen/SaaS_location_barcode_RPT_1.xdo"
+    "/Custom/Extraction Reports/SaaS_location_barcode_praveen/saas_location_barcode_p.xdo"
 )
 DEFAULT_TRANSACTION_REPORT_PATH = (
-    "/Custom/Extraction Reports/Barcode_transaction_type/Barcode_transcation_type_4_RPT.xdo"
+    "/Custom/Extraction Reports/Barcode_transaction_type/Barcode_transaction_type_4_RPT.xdo"
+)
+DEFAULT_AR_REPORT_PATH = (
+    "/Custom/Extraction Reports/AR_Invoices_Praveen/AR_invoices_RPT.xdo"
+)
+DEFAULT_AP_REPORT_PATH = (
+    "/Custom/Extraction Reports/AP_invoice_ledger_Praveen/AP_Inovice_status_RPT.xdo"
+)
+DEFAULT_WO_RM_REPORT_PATH = (
+    "/Custom/Extraction Reports/Work_order_rm_consumption_praveen/Work_order_rm_consumption_RPT.xdo"
 )
 
 TERMINAL_JOB_STATUSES = frozenset({
@@ -58,6 +67,7 @@ CACHE_META = CACHE_DIR / "item_wd_atp_uom.meta.json"
 _refresh_lock = False
 _item_status_cache: dict[str, tuple[float, dict]] = {}
 _barcode_report_cache: dict[str, tuple[float, dict]] = {}
+_finance_report_cache: dict[str, tuple[float, dict]] = {}
 
 
 class FusionSoapConfigError(RuntimeError):
@@ -107,13 +117,14 @@ def _transaction_report_path() -> str:
 
 
 def _barcode_report_param(kind: str) -> str:
+    default = "lot_number"
     if kind == "location":
-        return os.getenv("FUSION_LOCATION_REPORT_PARAM", "stock_code").strip() or "stock_code"
-    return os.getenv("FUSION_TRANSACTION_REPORT_PARAM", "stock_code").strip() or "stock_code"
+        return os.getenv("FUSION_LOCATION_REPORT_PARAM", default).strip() or default
+    return os.getenv("FUSION_TRANSACTION_REPORT_PARAM", default).strip() or default
 
 
 def _barcode_saas_enabled() -> bool:
-    return os.getenv("FUSION_ENABLE_BARCODE_SAAS_REPORTS", "0").lower() in {"1", "true", "yes"}
+    return os.getenv("FUSION_ENABLE_BARCODE_SAAS_REPORTS", "1").lower() in {"1", "true", "yes"}
 
 
 def _barcode_report_timeout() -> int:
@@ -121,6 +132,147 @@ def _barcode_report_timeout() -> int:
         return int(os.getenv("FUSION_BARCODE_REPORT_TIMEOUT", "45"))
     except ValueError:
         return 45
+
+
+def _ar_report_path() -> str:
+    return os.getenv("FUSION_AR_REPORT_PATH", DEFAULT_AR_REPORT_PATH).strip()
+
+
+def _ap_report_path() -> str:
+    return os.getenv("FUSION_AP_REPORT_PATH", DEFAULT_AP_REPORT_PATH).strip()
+
+
+def _wo_rm_report_path() -> str:
+    return os.getenv("FUSION_WO_RM_REPORT_PATH", DEFAULT_WO_RM_REPORT_PATH).strip()
+
+
+def _ar_invoice_param() -> str:
+    return os.getenv("FUSION_AR_INVOICE_PARAM", "invoice_number").strip() or "invoice_number"
+
+
+def _ap_invoice_param() -> str:
+    return os.getenv("FUSION_AP_INVOICE_PARAM", "invoice_number").strip() or "invoice_number"
+
+
+def _wo_rm_param() -> str:
+    return os.getenv("FUSION_WO_RM_PARAM", "work_order_number").strip() or "work_order_number"
+
+
+def _saas_finance_enabled() -> bool:
+    return os.getenv("FUSION_ENABLE_SAAS_FINANCE_REPORTS", "1").lower() in {"1", "true", "yes"}
+
+
+def _finance_report_timeout() -> int:
+    try:
+        return int(os.getenv("FUSION_FINANCE_REPORT_TIMEOUT", "60"))
+    except ValueError:
+        return 60
+
+
+# Fusion transaction type name ↔ abbreviation (SaaS report returns full names; CL/PaaS often use codes).
+TRANSACTION_TYPE_NAME_TO_CODE: dict[str, str] = {
+    "Barcode Onhand Migration": "BOM",
+    "Barcode Weight Decrease": "BWD",
+    "Barcode Weight Increase": "BWI",
+    "CL Costing Correction In": "CLCCI",
+    "CL Costing Correction Out": "CLCCO",
+    "CL Residual Stock Addition": "CLRSA",
+    "CL Stock Residual Issue": "CLSRI",
+    "CL_WIP_MFG": "CLWM",
+    "CL_WIP_RM_TRANSFER": "CLWRT",
+    "Clear Lost": "CLL",
+    "Clear Metal Loss": "CML",
+    "Corrected Duplicate Barcode Receipt": "CDBR",
+    "DIAMOND ASSORTMENT IN": "DAI",
+    "DIAMOND ASSORTMENT OUT": "DAO",
+    "Direct Sales Order Issue": "DSOI",
+    "Duplicate Barcode Issue": "DBI",
+    "FG onhand correction": "FGOC",
+    "IN HOUSE QTY CORRECTION": "IHQC",
+    "Inventory Lot Merge": "ILM",
+    "JW VENDOR MATERIAL ADDITION": "JWVMA",
+    "JW WIP RECEIPT": "JWWR",
+    "MFG WIP RECEIPT": "MWR",
+    "Melting FG Return": "MLTFR",
+    "Melting Issue": "MLTI",
+    "Melting LTE_LTB Return": "MLLR",
+    "Melting Return": "MLTR",
+    "Memo Issue": "MEMI",
+    "Memo Return": "MEMR",
+    "Purchase Order Receipt": "POR",
+    "Quantity Split Barcode Issue": "QSBI",
+    "Quantity Split Barcode Receipt": "QSBR",
+    "RMA Receipt": "RMA",
+    "RM Barcode Onhand Migration": "RMBOM",
+    "RM Onhand Correction": "RMOHC",
+    "Repair Barcode Migration": "RBM",
+    "Residual Quantity Receipt": "RQR",
+    "Residual Quantity Issue": "RQI",
+    "Return to Supplier": "RTNS",
+    "SALES ORDER ISSUE CORRECTION": "SOIC",
+    "SALES ORDER ISSUE CORRECTION REMOVAL": "SOICR",
+    "Sales Order Issue": "SOI",
+    "Sales Order Issue Correction": "SOIC",
+    "Sales Order Pick": "SOP",
+    "Sales Order Wrong Barcode Correction": "SOWBC",
+    "Stock Addition": "STKA",
+    "Stock Deduction": "STKD",
+    "Subinventory Transfer": "SUBIT",
+    "Transfer Order Interorganization Shipment": "TOIS",
+    "Transfer Order Pick": "TOP",
+    "Transfer Order Interorganization Receipt": "TOIR",
+    "Transfer Order Return Receipt": "TORR",
+    "Transfer Order Return Shipment": "TORS",
+    "Vendor memo inward": "VMEMI",
+    "Vendor memo outward": "VMEMO",
+    "Work in Process Product Completion": "WPPC",
+    "Work in Process Material Issue": "WPMI",
+    "Work in Process Material Return": "WPMR",
+    "Work in Process Product Return": "WPPR",
+}
+
+
+def _norm_txn_key(value: Any) -> str:
+    s = "" if value is None else str(value).strip()
+    return re.sub(r"[\s_]+", " ", s.upper())
+
+
+_TRANSACTION_TYPE_CODES = frozenset(TRANSACTION_TYPE_NAME_TO_CODE.values())
+_TRANSACTION_TYPE_LOOKUP: dict[str, str] = {}
+for _name, _code in TRANSACTION_TYPE_NAME_TO_CODE.items():
+    _TRANSACTION_TYPE_LOOKUP[_norm_txn_key(_name)] = _code
+    _TRANSACTION_TYPE_LOOKUP[_code.upper()] = _code
+_TRANSACTION_TYPE_CODE_TO_NAME: dict[str, str] = {}
+for _name, _code in TRANSACTION_TYPE_NAME_TO_CODE.items():
+    key = _code.upper()
+    if key not in _TRANSACTION_TYPE_CODE_TO_NAME:
+        _TRANSACTION_TYPE_CODE_TO_NAME[key] = _name
+
+
+def transaction_type_to_code(value: Any) -> str:
+    """Normalize a Fusion transaction label or code to its standard abbreviation."""
+    raw = "" if value is None else str(value).strip()
+    if not raw:
+        return ""
+    key = _norm_txn_key(raw)
+    if key in _TRANSACTION_TYPE_LOOKUP:
+        return _TRANSACTION_TYPE_LOOKUP[key]
+    upper = raw.upper()
+    if upper in _TRANSACTION_TYPE_CODES:
+        return upper
+    for map_key, code in _TRANSACTION_TYPE_LOOKUP.items():
+        if key == map_key or key in map_key or map_key in key:
+            return code
+    return upper
+
+
+def transaction_type_to_name(value: Any) -> str:
+    """Best-effort full transaction name from code or label."""
+    raw = "" if value is None else str(value).strip()
+    if not raw:
+        return ""
+    code = transaction_type_to_code(raw)
+    return _TRANSACTION_TYPE_CODE_TO_NAME.get(code, raw)
 
 
 def escape_xml(value: Any) -> str:
@@ -674,14 +826,18 @@ def _row_to_barcode_record(norm: dict[str, str], fallback_barcode: Optional[str]
     ) or fallback_barcode
     if not barcode:
         return None
+    raw_type = _pick_column(
+        norm, "TRANSACTION_TYPE", "TRANSACTION_TYPE_NAME", "TRANS_TYPE", "TRANSACTION"
+    )
+    txn_code = transaction_type_to_code(raw_type) if raw_type else ""
     return {
         "barcode": barcode,
         "location_name": _pick_column(
             norm, "LOCATION_NAME", "ORGANIZATION_NAME", "LOC_NAME", "LOCATION"
         ),
-        "transaction_type": _pick_column(
-            norm, "TRANSACTION_TYPE", "TRANSACTION_TYPE_NAME", "TRANS_TYPE"
-        ),
+        "transaction_type": txn_code or raw_type,
+        "transaction_type_name": transaction_type_to_name(txn_code or raw_type),
+        "transaction_type_raw": raw_type,
         "barcode_status": _pick_column(norm, "BARCODE_STATUS", "STOCK_STATUS", "STATUS"),
         "transaction_status": _pick_column(norm, "TRANSACTION_STATUS", "TRANS_STATUS"),
     }
@@ -704,6 +860,11 @@ def _parse_barcode_report_csv(csv_text: str, *, fallback_barcode: Optional[str] 
             or rec.get("transaction_status")
         ):
             return rec
+    # Some SaaS templates return only BARCODE/LOT_NUMBER echo before full columns are wired.
+    header = _norm_col(lines[0].split(",")[0] if "," in lines[0] else lines[0])
+    value = lines[1].split(",")[0].strip() if "," in lines[1] else lines[1].strip()
+    if value and header in {"BARCODE", "LOT_NUMBER", "STOCK_CODE", "STOCK_ID"}:
+        return _row_to_barcode_record({header: value}, fallback_barcode=fallback_barcode or value)
     return None
 
 
@@ -726,16 +887,28 @@ def run_barcode_report(kind: str, barcode: str) -> dict:
     if kind == "location":
         report_path = _location_report_path()
         param = _barcode_report_param("location")
+        # Location template binds lot_number; also send barcode alias for the same value.
+        parameters = {param: bc, "barcode": bc}
     elif kind == "transaction":
         report_path = _transaction_report_path()
         param = _barcode_report_param("transaction")
+        parameters = {param: bc}
     else:
         raise ValueError(f"Unknown barcode report kind: {kind}")
 
-    csv_text = run_report_csv(report_path, {param: bc}, timeout=_barcode_report_timeout())
+    csv_text = run_report_csv(report_path, parameters, timeout=_barcode_report_timeout())
+    logger.info(
+        "Fusion %s report for %s via %s (%s)",
+        kind, bc, parameters, report_path,
+    )
     rec = _parse_barcode_report_csv(csv_text, fallback_barcode=bc)
     if not rec:
         raise RuntimeError(f"Fusion {kind} report returned no rows for {bc}")
+    if not any(rec.get(k) for k in ("location_name", "transaction_type", "barcode_status", "transaction_status")):
+        logger.warning(
+            "Fusion %s report for %s returned barcode only (no location/transaction columns yet)",
+            kind, bc,
+        )
 
     _barcode_report_cache[cache_key] = (now, rec)
     return dict(rec)
@@ -772,6 +945,138 @@ def _lookup_barcode_reports(kind: str, barcodes: list[str]) -> tuple[dict[str, d
     return out, state
 
 
+def _parse_csv_all_rows(csv_text: str) -> list[dict[str, str]]:
+    lines = [line for line in (csv_text or "").splitlines() if line.strip()]
+    if len(lines) < 2:
+        return []
+    reader = csv.DictReader(lines)
+    if not reader.fieldnames:
+        return []
+    out: list[dict[str, str]] = []
+    for row in reader:
+        norm = {
+            _norm_col(k): (v.strip() if isinstance(v, str) else str(v) if v is not None else "")
+            for k, v in row.items() if k
+        }
+        if any(norm.values()):
+            out.append(norm)
+    return out
+
+
+def _finance_cache_get(key: str) -> Optional[dict]:
+    cached = _finance_report_cache.get(key)
+    if cached and (time.time() - cached[0]) < _cache_ttl_seconds():
+        return dict(cached[1])
+    return None
+
+
+def _finance_cache_put(key: str, value: dict) -> dict:
+    _finance_report_cache[key] = (time.time(), value)
+    return value
+
+
+def _run_finance_report(report_path: str, param_name: str, param_value: str) -> list[dict[str, str]]:
+    if not _saas_finance_enabled() or not soap_configured():
+        return []
+    cache_key = f"{report_path}|{param_name}|{param_value}"
+    hit = _finance_cache_get(cache_key)
+    if hit is not None:
+        return hit.get("rows") or []
+    try:
+        csv_text = run_report_csv(
+            report_path,
+            {param_name: param_value},
+            timeout=_finance_report_timeout(),
+        )
+        rows = _parse_csv_all_rows(csv_text)
+        _finance_cache_put(cache_key, {"rows": rows})
+        return rows
+    except Exception as exc:
+        logger.warning("Fusion finance report failed (%s=%s): %s", param_name, param_value, exc)
+        _finance_cache_put(cache_key, {"rows": [], "error": str(exc)})
+        return []
+
+
+def lookup_ar_invoice(invoice_number: str) -> dict:
+    inv = str(invoice_number or "").strip()
+    if not inv:
+        return {}
+    rows = _run_finance_report(_ar_report_path(), _ar_invoice_param(), inv)
+    if not rows:
+        return {"invoice_number": inv, "found": False}
+    norm = rows[0]
+    return {
+        "invoice_number": inv,
+        "found": True,
+        "status": _pick_column(norm, "STATUS", "INVOICE_STATUS"),
+        "invoice_status": _pick_column(norm, "INVOICE_STATUS", "STATUS"),
+        "amount_due_original": _pick_column(norm, "AMOUNT_DUE_ORIGINAL", "AMOUNT"),
+        "amount_due_remaining": _pick_column(norm, "AMOUNT_DUE_REMAINING", "BALANCE"),
+        "customer_name": _pick_column(norm, "CUSTOMER_NAME"),
+        "trx_date": _pick_column(norm, "TRX_DATE", "INVOICE_DATE"),
+    }
+
+
+def lookup_ap_invoice(invoice_number: str) -> dict:
+    inv = str(invoice_number or "").strip()
+    if not inv:
+        return {}
+    rows = _run_finance_report(_ap_report_path(), _ap_invoice_param(), inv)
+    if not rows:
+        return {"invoice_number": inv, "found": False}
+    norm = rows[0]
+    return {
+        "invoice_number": inv,
+        "found": True,
+        "payment_status": _pick_column(norm, "PAYMENT_STATUS", "STATUS"),
+        "payment_status_flag": _pick_column(norm, "PAYMENT_STATUS_FLAG"),
+        "balance_amount": _pick_column(norm, "BALANCE_AMOUNT", "INVOICE_AMOUNT"),
+        "ledger_id": _pick_column(norm, "LEDGER_ID"),
+        "ledger_name": _pick_column(norm, "LEDGER_NAME"),
+        "supplier_name": _pick_column(norm, "SUPPLIER_NAME"),
+    }
+
+
+def lookup_wo_rm_consumption(work_order_number: str) -> dict:
+    wo = str(work_order_number or "").strip()
+    if not wo:
+        return {}
+    rows = _run_finance_report(_wo_rm_report_path(), _wo_rm_param(), wo)
+    return {
+        "work_order_number": wo,
+        "consumed": len(rows) > 0,
+        "row_count": len(rows),
+        "rows": rows[:3],
+    }
+
+
+def fetch_finance_saas_batch(
+    ar_invoices: list[str],
+    ap_invoices: list[str],
+    work_orders: list[str],
+) -> dict:
+    """Batch AR/AP/WO RM SaaS lookups for SOP checks."""
+    ar_out: dict[str, dict] = {}
+    ap_out: dict[str, dict] = {}
+    rm_out: dict[str, dict] = {}
+
+    for inv in sorted({str(i).strip() for i in ar_invoices if str(i).strip()}):
+        ar_out[inv] = lookup_ar_invoice(inv)
+
+    for inv in sorted({str(i).strip() for i in ap_invoices if str(i).strip()}):
+        ap_out[inv] = lookup_ap_invoice(inv)
+
+    for wo in sorted({str(w).strip() for w in work_orders if str(w).strip()}):
+        rm_out[wo] = lookup_wo_rm_consumption(wo)
+
+    return {
+        "ar_by_invoice": ar_out,
+        "ap_by_invoice": ap_out,
+        "rm_by_wo": rm_out,
+        "enabled": _saas_finance_enabled() and soap_configured(),
+    }
+
+
 def _parse_report_csv_text(csv_text: str, *, fallback_item: Optional[str] = None) -> Optional[dict]:
     lines = [line for line in (csv_text or "").splitlines() if line.strip()]
     if len(lines) < 2:
@@ -782,7 +1087,7 @@ def _parse_report_csv_text(csv_text: str, *, fallback_item: Optional[str] = None
     for row in reader:
         norm = {_norm_col(k): (v.strip() if isinstance(v, str) else v) for k, v in row.items() if k}
         status = _row_to_status(norm, fallback_item=fallback_item)
-        if status and (status.get("atp_status") or status.get("wd_status") or status.get("uom_status")):
+        if status:
             return status
     return None
 
@@ -855,7 +1160,12 @@ def cache_status() -> dict:
     }
 
 
-def lookup_item_atp_wd_uom(item_numbers: list[str], *, allow_refresh: bool = False) -> tuple[dict[str, dict], str]:
+def lookup_item_atp_wd_uom(
+    item_numbers: list[str],
+    *,
+    allow_refresh: bool = False,
+    sync_on_miss: Optional[bool] = None,
+) -> tuple[dict[str, dict], str]:
     """Lookup ATP/WD/UOM status per item_number. Returns (map, cache_state)."""
     cleaned = sorted({str(i).strip() for i in item_numbers if str(i).strip()})
     if not cleaned:
@@ -863,6 +1173,9 @@ def lookup_item_atp_wd_uom(item_numbers: list[str], *, allow_refresh: bool = Fal
 
     if not soap_configured():
         return {}, "soap_not_configured"
+
+    if sync_on_miss is None:
+        sync_on_miss = os.getenv("FUSION_REPORT_SYNC_ON_MISS", "1").lower() in {"1", "true", "yes"}
 
     out: dict[str, dict] = {}
     missing = list(cleaned)
@@ -875,20 +1188,29 @@ def lookup_item_atp_wd_uom(item_numbers: list[str], *, allow_refresh: bool = Fal
         missing = [sku for sku in cleaned if sku not in out]
 
     if missing:
-        # Per-item Fusion runReport is a slow synchronous SOAP call (~1-2s each). Only do
-        # it when explicitly opted in (allow_refresh) or FUSION_REPORT_SYNC_ON_MISS=1 —
-        # otherwise serve from cache and let /api/fusion-report/refresh fill it out-of-band,
-        # so the audit isn't blocked for seconds on a cold cache.
-        sync_on_miss = os.getenv("FUSION_REPORT_SYNC_ON_MISS", "").lower() in {"1", "true", "yes"}
         if not (allow_refresh or sync_on_miss):
             return out, ("partial_cache" if out else "cache_miss")
         per_item_errors = 0
-        for sku in missing:
+        if len(missing) == 1:
+            sku = missing[0]
             try:
                 out[sku] = run_report_for_item(sku)
             except Exception as exc:
                 per_item_errors += 1
                 logger.warning("Fusion runReport failed for %s: %s", sku, exc)
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            workers = min(4, len(missing))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(run_report_for_item, sku): sku for sku in missing}
+                for fut in as_completed(futures):
+                    sku = futures[fut]
+                    try:
+                        out[sku] = fut.result()
+                    except Exception as exc:
+                        per_item_errors += 1
+                        logger.warning("Fusion runReport failed for %s: %s", sku, exc)
         if out:
             state = "run_report" if len(out) == len(cleaned) else "partial_run_report"
         elif per_item_errors:
@@ -921,11 +1243,20 @@ if __name__ == "__main__":
     import argparse
 
     logging.basicConfig(level=logging.INFO)
-    parser = argparse.ArgumentParser(description="Refresh Fusion item ATP/WD/UOM report cache")
-    parser.add_argument("--refresh", action="store_true", help="Download report via SOAP")
-    parser.add_argument("--status", action="store_true", help="Show cache status")
+    parser = argparse.ArgumentParser(description="Fusion BI report utilities")
+    parser.add_argument("--refresh", action="store_true", help="Download item ATP/WD/UOM cache via SOAP")
+    parser.add_argument("--status", action="store_true", help="Show ATP cache status")
+    parser.add_argument("--barcode", metavar="LOT", help="Test SaaS location + transaction reports for one barcode")
     args = parser.parse_args()
-    if args.refresh:
+    if args.barcode:
+        bc = args.barcode.strip()
+        for kind in ("location", "transaction"):
+            try:
+                rec = run_barcode_report(kind, bc)
+                print(f"{kind}: {json.dumps(rec, indent=2)}")
+            except Exception as exc:
+                print(f"{kind}: ERROR — {exc}")
+    elif args.refresh:
         print(refresh_report_cache())
     elif args.status:
         print(json.dumps(cache_status(), indent=2))
